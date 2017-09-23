@@ -27,10 +27,8 @@ Dynamics are computed with an rk4 algorithm available as a method to the
 Cloud class. The acceleration used in rk4 is calculated at any point in
 spacetime by multiplying the gradient of the norm of the normalized magnetic
 field evaluated at point r, by a time dependent current signal evaluated at
-time t.
-\begin{equation}
-    a = \pm \frac{\mu}{m} * I(t) * grad |B(r, I=1))|
-\end{equation}
+time t, $a = \pm \frac{\mu}{m} * I(t) * grad |B(r, I=1))|$
+
 The sign is given by the internal magnetic state of the atom (+1 or -1) which
 is tracked as a seventh dimension of phase space. We assume a quantization
 axis of z. This means the mop coils are extpected to have a normal of
