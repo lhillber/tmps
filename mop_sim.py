@@ -30,7 +30,7 @@ params = dict(
 
     # cloud params
     T        = 200,                        # initial temperature, mK
-    Natom    = 10000,                      # number of atoms to simulate
+    Natom    = 1000,                      # number of atoms to simulate
     width    = [ 0.25, 0.25, 0.25],        # initial size (st. dev), cm
     r0_cloud = [0.0, 0.0, 0.0],            # initial center, cm
     v0       = [0 * 1e2 * 1e-6, 0,0, 0.0], # initial velocity, cm/us
@@ -41,7 +41,7 @@ params = dict(
     Npulse   = 1,                           # Number of current pulses
     shape    = 'sin',                       # pulse shape, sin or square
     tau      = 100,                         # discharge time, us
-    tcharge  = 30,                          # recharge time,  us
+    tcharge  = 10,                          # recharge time,  us
     decay    = 1.5,                         # factor to decreasue I0 each pulse
 
     # time evolution params
@@ -52,9 +52,9 @@ params = dict(
     delay    = None,                        # deleay before first pulse, us
 
     # B-field solution grid
-    Nzsteps  =  10,
-    Nysteps  =  10,
-    Nxsteps  =  10,
+    Nzsteps  =  100,
+    Nysteps  =  100,
+    Nxsteps  =  100,
     xmin     = -2,
     xmax     =  2,
     ymin     = -2,
@@ -67,7 +67,7 @@ params = dict(
     # relative or absolute path to dir where plots are to be saved (must exist)
     plot_dir = 'plots',
     # suffix or version number appended to plot file names
-    suffix   = '_default'
+    suffix   = ''
     )
 
 # DO IT!

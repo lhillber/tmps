@@ -1,12 +1,12 @@
 #! user/bin/python3
 #
-# mop_sim.py
+# tmps.py
 #
 # By Logan Hillberry
 #
 # lhillberry@gmail.com
 #
-# Last updated 21 September 2017
+# Last updated 30 October 2017
 #
 # DESCRIPTION
 # ===========
@@ -76,7 +76,7 @@
 #                             python3 mop_sim.py
 #
 # in the directory containing this script. It will generate a file of several
-# plot called plots called mop_sim.pdf in the same directory.
+# plot called plots called mop_sim.pdf in the `plots` directory.
 #
 # REQUIREMENTS
 # ============
@@ -164,7 +164,6 @@ plt.rcParams.update(plt_params)
 # Input allnumbers in uits of: cm, us, mK, A, kg
 u0 = 1.257e-6 * 1e2 * 1e-12
     # magnetic permiability, kg m A^-2 s^-2 cm/m s^2/us^2
-
 kB = 1.381e-23 * 1e4 * 1e-12 * 1e-3
     # Boltzmann's constant, kg m^2 s^-2 K^-1 cm^2/m^2 s^2/us^2 K/mk
 h  = 6.62607004e-34 * 1e4 * 1e-6
@@ -291,9 +290,8 @@ def format_params(params):
         if params['v0'][0] == 0:
             params['delay'] = 0.0
         else:
-            params['delay'] = abs(
-                    params['r0_cloud'][0] -\
-                    2 * params['width'][0]) / params['v0'][0]  # us
+            params['delay'] = (abs(
+                    params['r0_cloud'][0])) / params['v0'][0]  # us
     if params['dt'] == None:
         params['dt'] = params['tau']/100  # us
     if params['tmax'] == None:
@@ -445,7 +443,6 @@ def plot_grad_norm_B_slices(fignum, cloud,
     x, y, z = cloud.xyz
     I0 = cloud.params['I0']
     fig = plt.figure(fignum, figsize=(6,4))
-    skip_slice = [slice(None, None, skip)]*3
     dBdx, dBdy, dBdz = I0*np.asarray(grad_norm_B)*1e12
     # plot the field and coils
     xinterp = RegularGridInterpolator((x,y,z), dBdx,
@@ -455,7 +452,7 @@ def plot_grad_norm_B_slices(fignum, cloud,
     zinterp = RegularGridInterpolator((x,y,z), dBdz,
         method='linear', bounds_error=False, fill_value=0)
     for coordi, (coord, interp) in enumerate(zip(
-            ['x', 'z'], [xinterp, zinterp])):
+            [r'\rho', 'z'], [xinterp, zinterp])):
         ax = fig.add_subplot(2,1,coordi+1)
         ax.set_ylabel(r'$\partial |B|/\partial %s$ [T/cm]' % coord)
         for slicei, rho in enumerate([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]):
@@ -464,7 +461,7 @@ def plot_grad_norm_B_slices(fignum, cloud,
             off = np.zeros(len(z))
             if coord in ('y'):
                 xs = np.vstack((off, on, z)).T
-            if coord in ('x', 'z'):
+            if coord in ('x', 'z', r'\rho'):
                 xs = np.vstack((on, off, z)).T
             ax.xaxis.set_major_formatter(FormatStrFormatter('%.1f'))
             ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
@@ -472,8 +469,8 @@ def plot_grad_norm_B_slices(fignum, cloud,
                 ax.xaxis.set_major_formatter(NullFormatter())
             if coordi != 0:
                 ax.set_xlabel(r'$z$ [cm]')
-
-            ax.plot(z, interp(xs), label=label)
+            mask = np.logical_and(z>-0.75, z<0.75)
+            ax.plot(z[mask], interp(xs[mask]),label=label)
     ax.legend(ncol=1, loc='lower left', bbox_to_anchor=[1,0.2],
             handlelength=1, labelspacing=0.2, handletextpad=0.2)
     ax.text(1.04, 1.65, r'$\rho$ [cm]', transform=ax.transAxes)
@@ -575,7 +572,7 @@ def plot_temps(fignum, cloud, include_names=['Tx','Ty','Tz','T']):
             use_label = '$T_{}$'.format(label[1])
             if label == 'T':
                 use_label = '$T$'
-            axT.plot(ts, temp, label=use_label, c=color, ls=line)
+            axT.semilogy(ts, temp, label=use_label, c=color, ls=line)
         axT.set_xlabel('$t$ [$\mu$s]')
         axT.set_ylabel('$T$ [mK]')
     axT.legend()
@@ -641,20 +638,26 @@ def plot_traj(fignum, cloud, seglen=2):
     alphas = np.linspace(1/Ntsteps, 1, int(Ntsteps))
     for j, spin in enumerate(spins):
         if j < 1000:
+            x, y, z = traj[::,j,0], traj[::,j,1], traj[::,j,2]
+            ax.plot(x, y, z, color=spin_color[int((spin) + 1/2)],
+                    lw=1.2)
+            ax.plot([x[-1]],[y[-1]],[z[-1]], color='k',
+                mew=0., alpha=0.9, marker=marker_dict[spin], ms=10)
+
             for f in range(0, Ntsteps-seglen, seglen):
                 x, y, z = traj[f:f+seglen+1,j,0], traj[f:f+seglen+1,j,1],\
                         traj[f:f+seglen+1,j,2]
-                ax.plot(x, y, z, color=spin_color[int((spin) + 1/2)],
-                    lw=1.2, alpha = alphas[f])
-            ax.plot([x[-1]],[y[-1]],[z[-1]], color='k',
-                mew=0., alpha=0.9, marker=marker_dict[spin], ms=10)
+                #ax.plot(x, y, z, color=spin_color[int((spin) + 1/2)],
+                #    lw=1.2, alpha = alphas[f])
+            #ax.plot([x[-1]],[y[-1]],[z[-1]], color='k',
+            #    mew=0., alpha=0.9, marker=marker_dict[spin], ms=10)
         elif j > 100:
             print('Only plotting trajectory for the first 1000 atoms')
             break
 
     if not grad_norm_B is None:
         plot_grad_norm_B(ax, grad_norm_B, X, Y, Z, **cloud.params)
-    mop_viz(ax, **params)
+    mop_viz(ax, **cloud.params)
     fignum+=1
     return fignum
 
@@ -864,8 +867,8 @@ class Cloud():
             self.xs        = self.particles[:, 0:3]
             self.vs        = self.particles[:, 3:6]
             self.spins     = self.particles[:, 6]
-            self.drop_mask = self.particles[:, 7]
-            self.keep_mask = self.particles[:, 7] + 1
+            self.drop_mask = [False]*self.N
+            self.keep_mask = np.logical_not(self.drop_mask)
 
             for i in range(3):
                 np.random.seed(seed)
@@ -934,13 +937,11 @@ class Cloud():
         old_vs = self.vs.copy()
         self.xs[::] = new_xs
         # drop particles outside the following simulation volume
-        self.drop_mask = np.all(np.vstack([np.abs(new_xs[::,0]) > rtube,\
-            new_xs[:,1]**2 +  new_xs[:,2] > rtube**2]), axis=0)
-        #self.drop_mask = [False]*self.N
-        self.keep_mask = np.logical_not(self.drop_mask)
-        self.xs[self.drop_mask] = old_xs[self.drop_mask]
+        #self.drop_mask = np.all(np.vstack([np.abs(new_xs[::,0]) > rtube,\
+        #    new_xs[:,1]**2 +  new_xs[:,2] > rtube**2]), axis=0)
+        #self.xs[self.drop_mask] = old_xs[self.drop_mask]
         self.vs[::] = new_vs
-        self.vs[self.drop_mask] = old_vs[self.drop_mask]
+        #self.vs[self.drop_mask] = old_vs[self.drop_mask]
 
     def optical_pump(self, mode):
         if mode in ('vs', 'vel', 'v'):
@@ -1093,131 +1094,231 @@ def make_acceleration(curr_pulse, xyz, grad_norm_B, params):
         return a_xyz
     return a
 
-
 # Default behavior
-def run_sim(params,
-        load=True, save=True,
+# set load true to import previously saved data. If False, all other import
+# flags are ignored
+def run_sim(params_tmp,
+        load=False, save=True,
         recalculate_B=False, resimulate=True, replot=True):
-    # set load true to import previously saved data. If False, all other import
-    # flags are ignored
-    params = format_params(params)
-    for param, val in params.items():
-        print('{} = {}'.format(param, val))
-    print()
+    # process supplied params dictonary which may contain lists of parameters,
+    # signifying a parameter sweep.
+    params_list = []
+    sweep_vals_list = []
+    sweep_params=[]
+    for k, v in params_tmp.items():
+        # these parameters are a vectors, check if a list of them is supplied
+        if k in ('r0AH', 'r0HH', 'width', 'nAH', 'nHH', 'r0_cloud', 'v0'):
+            if type(v[0]) == list:
+                sweep_params.append(k)
+                sweep_vals_list.append(v)
+        # Most parameters are scalars, check if a list of them is supplied
+        else:
+            if type(v) == list:
+                sweep_params.append(k)
+                sweep_vals_list.append(v)
+    # dictinary of sweeped parameters as keys, their length as values
+    sweep_shape = {sweep_param:len(sweep_vals) for
+        sweep_param, sweep_vals in zip(sweep_params, sweep_vals_list)}
+    # Total number of simulations requested
+    num_sims = np.product([ i for i in sweep_shape.values()], dtype=int)
+    # initialize final/initial ratios of temperatures, x, y, z, and average
+    temp_ratios = np.zeros((4, num_sims))
+    if num_sims > 1:
+        sim_num = 0
+        # ensure every a set of parameters is generated for every combination of
+        # simulation parameters
+        sweep_vals_list_product = product(*sweep_vals_list)
+        sweep_params_product = [sweep_params] * num_sims
+        for sweep_vals, sweep_params in zip(
+                sweep_vals_list_product, sweep_params_product):
+            new_params = params_tmp.copy()
+            for sweep_val, sweep_param in zip(sweep_vals, sweep_params):
+                new_params[sweep_param] = sweep_val
+                new_params['suffix'] = params_tmp['suffix'] + '-' + str(sim_num)
+            params_list.append(new_params)
+            sim_num += 1
 
-    cloud = Cloud(**params, init_spins=None, load=load)
-    # time axis
-    ts = np.arange(params['t0'], params['tmax'], params['dt'])
-    Ntsteps = len(ts)
+    else:
+       params_list = [params_tmp]
 
-    if not hasattr(cloud, 'grad_norm_B') or recalculate_B:
-        # current evaluated at all simulation times
-        Is = [curr_pulse(t, **params) for t in ts]
-        # make and characterize 3D grid
-        x,y,z, X,Y,Z, r, dx,dy,dz, xshape,yshape,zshape, xlim,ylim,zlim =\
-            make_grid(**params)
-        # get B field and grad of norm of B field (unscaled for current)
-        Bx, By, Bz, dBdx, dBdy, dBdz = make_B(r, xshape, yshape, zshape, dx, dy,
-        dz, **params)
-
-        # load simulation data into the cloud class
-        cloud.params            = params
-        cloud.grid_list         = [X, Y, Z]
-        cloud.xyz               = [x, y, z]
-        cloud.r                 = r
-        cloud.dxyz              = [dx, dy, dz]
-        cloud.xyzshape          = [xshape, yshape, zshape]
-        cloud.xyzlim            = [xlim, ylim, zlim]
-        cloud.ts                = ts
-        cloud.Is                = Is
-        cloud.grad_norm_B       = [dBdx, dBdy, dBdz]
-
-    if not hasattr(cloud, 'traj') or resimulate:
-        # make an acceleration function a(xs, t) for use in rk4
-        a = make_acceleration(curr_pulse, cloud.xyz, cloud.grad_norm_B, params)
-        # initialize memory for simulation measures
-        cloud.traj = np.zeros((Ntsteps, params['Natom'], 3))
-        cloud.vels = np.zeros((Ntsteps, params['Natom'], 3))
-        cloud.temps = np.zeros((Ntsteps, 4))
-        cloud.dens = np.zeros((Ntsteps, 4))
-        cloud.psd  = np.zeros(Ntsteps)
-
-        # run the time evolution
+    # Run each simulation
+    for sim_num, params in enumerate(params_list):
+        print(params['delay'], params['v0'])
+        print('BEGINING SIMULATION {} of {}'.format(sim_num, num_sims))
         print()
-        ti = 0
-        # step forward through initial delay
-        for t in np.arange(params['t0'], params['delay']):
-            cloud.cloud.rk4(a, t, params['dt'])
-            cloud.traj[ti, ::, ::] = cloud.get_particles('xs')
-            cloud.vels[ti, ::, ::] = cloud.get_particles('vs')
-            cloud.temps[ti,::] = cloud.get_temp()
-            cloud.dens[ti] = cloud.get_density()
-            cloud.psd[ti] = cloud.get_psd()
-            ti+=1
-
-        # step forward through pulse sequence
-        ta = sum(params[tname] for tname in ('t0', 'delay'))
-        tb = sum(params[tname] for tname in ('t0', 'delay', 'tau', 'tcharge'))
-        for p in range(params['Npulse']):
-            for t in np.arange(ta, tb, params['dt']):
-                sys.stdout.write(' '*45 + 'simulating t = {:.2f} of {}\r'.format(
-                        t, params['tmax']))
-                sys.stdout.flush()
-                if  ta - params['dt']/2 < t < ta + params['dt']/2:
-                    typ = cloud.typs[0]
-                    print('PULSE {} BEGINS t = {}'.format(p+1, t))
-                    print('optically pumped t = {}'.format(t))
-                    cloud.optical_pump(typ)
-                cloud.rk4(a, t, params['dt'])
-                cloud.traj[ti, ::, ::] = cloud.get_particles('xs')
-                cloud.vels[ti, ::, ::] = cloud.get_particles('vs')
-                cloud.temps[ti,::] = cloud.get_temp()
-                cloud.dens[ti] = cloud.get_density()
-                cloud.psd[ti] = cloud.get_psd()
-
-                if ta + params['tau']/2 - params['dt']/2 < t < ta + params['tau']/2 + params['dt']/2:
-                    print('current peaks t = {}\r'.format(t))
-
-                if ta + params['tau'] - params['dt']/2 < t < ta + params['tau'] + params['dt']/2:
-                    print('Pulse {} ends t = {}\r'.format(p+1, t))
-                    print( 'temp | initl | final | ratio')
-                    print( '----------------------------')
-                    for label, temp in zip(cloud.temp_names, cloud.temps.T):
-                        print(  '  {} | {:>5.1f} | {:>5.1f} | {:<5.3f}'.format(
-                            label, temp[0], temp[ti], temp[ti]/temp[0]))
-                    print()
-                ti += 1
-            ta = tb
-            tb = ta + params['tau'] + params['tcharge']
-
-        cloud.Nremain = np.sum(cloud.keep_mask)
-        print('{}/{} atoms remain'.format(
-                cloud.Nremain, params['Natom']))
+        params = format_params(params)
+        for param, val in params.items():
+            print('{} = {}'.format(param, val))
         print()
+        # instance of cloud class for each simulation
+        cloud = Cloud(**params, init_spins=None, load=load)
+        # time axis
+        ts = np.arange(params['t0'], params['tmax'], params['dt'])
+        Ntsteps = len(ts)
+        if not hasattr(cloud, 'grad_norm_B') or recalculate_B:
+            # electric current evaluated at all simulation times
+            Is = [curr_pulse(t, **params) for t in ts]
+            # make and characterize 3D grid
+            x,y,z, X,Y,Z, r, dx,dy,dz, xshape,yshape,zshape, xlim,ylim,zlim =\
+                make_grid(**params)
+            # get B field and grad of norm of B field (unscaled for current)
+            Bx, By, Bz, dBdx, dBdy, dBdz = make_B(r, xshape, yshape, zshape, dx, dy,
+            dz, **params)
 
+            # load simulation data into the cloud class
+            cloud.params            = params
+            cloud.grid_list         = [X, Y, Z]
+            cloud.xyz               = [x, y, z]
+            cloud.r                 = r
+            cloud.dxyz              = [dx, dy, dz]
+            cloud.xyzshape          = [xshape, yshape, zshape]
+            cloud.xyzlim            = [xlim, ylim, zlim]
+            cloud.ts                = ts
+            cloud.Is                = Is
+            cloud.grad_norm_B       = [dBdx, dBdy, dBdz]
 
-    if not hasattr(cloud, 'traj') or\
-            not hasattr(cloud, 'grad_norm_B') or replot:
-        fignum = 0
-        #fignum = animate_traj(fignum, cloud)
-        fignum = plot_grad_norm_B_slices(fignum, cloud)
-        #fignum = plot_traj(fignum, cloud)
-        #fignum = plot_phase_space(fignum, cloud)
-        fignum = plot_temps(fignum, cloud, include_names=['Tx','Ty','Tz'])
-        fignum = plot_psd(fignum, cloud)
-        fignum = plot_scalar_summary(fignum, cloud)
+        if not hasattr(cloud, 'traj') or resimulate:
+            # make an acceleration function a(xs, t) for use in rk4
+            a = make_acceleration(curr_pulse, cloud.xyz,
+                    cloud.grad_norm_B, params)
+            # initialize memory for simulation measures
+            # real space trajectory
+            cloud.traj = np.zeros((Ntsteps, params['Natom'], 3))
+            # velocity space trajectory
+            cloud.vels = np.zeros((Ntsteps, params['Natom'], 3))
+            # x, y, z, and average temperatures
+            cloud.temps = np.zeros((Ntsteps, 4))
+            # x, y, z, and average densities
+            cloud.dens = np.zeros((Ntsteps, 4))
+            # phase space density
+            cloud.psd  = np.zeros(Ntsteps)
 
-        # show or save plots
-        #plt.show()
-        save_loc = os.path.join(params['plot_dir'],'mop_sim' +\
-                params['suffix'] + '.pdf')
-        print('saving plots...')
-        multipage(save_loc, dpi=600)
-        print('plots saved to {}'.format(save_loc))
-    if save == True:
-        cloud.save()
-    return cloud
+            # run the time evolution
+            print()
+            ti = 0
+            # step forward through initial delay
+            # TODO: no need to rk4 this since there are no forces
+            for t in np.arange(params['t0'], params['delay'], params['dt']):
+                if ti < Ntsteps:
+                    cloud.rk4(a, t, params['dt'])
+                    cloud.traj[ti, ::, ::] = cloud.get_particles('xs')
+                    cloud.vels[ti, ::, ::] = cloud.get_particles('vs')
+                    cloud.temps[ti,::] = cloud.get_temp()
+                    cloud.dens[ti] = cloud.get_density()
+                    cloud.psd[ti] = cloud.get_psd()
+                    ti+=1
+
+            # step forward through pulse sequence
+            ta = sum(params[tname] for tname in ('t0', 'delay'))
+            tb = sum(params[tname] for tname in ('t0', 'delay', 'tau', 'tcharge'))
+            for p in range(params['Npulse']):
+                for t in np.arange(ta, tb, params['dt']):
+                    sys.stdout.write(' '*45 + 'simulating t = {:.2f} of {}\r'.format(t, params['tmax']))
+                    sys.stdout.flush()
+                    if  ta - params['dt']/2 < t < ta + params['dt']/2:
+                        typ = cloud.typs[0]
+                        print('PULSE {} BEGINS t = {}'.format(p+1, t))
+                        print('optically pumped t = {}'.format(t))
+                        cloud.optical_pump(typ)
+                    if ti < Ntsteps:
+                        cloud.rk4(a, t, params['dt'])
+                        cloud.traj[ti, ::, ::] = cloud.get_particles('xs')
+                        cloud.vels[ti, ::, ::] = cloud.get_particles('vs')
+                        cloud.temps[ti, ::] = cloud.get_temp()
+                        cloud.dens[ti] = cloud.get_density()
+                        cloud.psd[ti] = cloud.get_psd()
+
+                    if ta + params['tau']/2 - params['dt']/2 < t < ta + params['tau']/2 + params['dt']/2:
+                        print('current peaks t = {}\r'.format(t))
+
+                    if ta + params['tau'] - params['dt']/2 < t < ta + params['tau'] + params['dt']/2:
+                        print('Pulse {} ends t = {}\r'.format(p+1, t))
+                        print( 'temp | initl | final | ratio')
+                        print( '----------------------------')
+                        for label, temp in zip(cloud.temp_names, cloud.temps.T):
+                            print(  '  {} | {:>5.1f} | {:>5.1f} | {:<5.3f}'.format(
+                                label, temp[0], temp[ti], temp[ti]/temp[0]))
+                        print()
+                    ti += 1
+                ta = tb
+                tb = ta + params['tau'] + params['tcharge']
+
+            cloud.Nremain = np.sum(cloud.keep_mask)
+            print('{}/{} atoms remain'.format(
+                    cloud.Nremain, params['Natom']))
+            print()
+
+        # plotting
+        if not hasattr(cloud, 'traj') or\
+                not hasattr(cloud, 'grad_norm_B') or replot:
+            fignum = 0
+            #fignum = animate_traj(fignum, cloud)
+            fignum = plot_grad_norm_B_slices(fignum, cloud)
+            fignum = plot_traj(fignum, cloud)
+            fignum = plot_phase_space(fignum, cloud)
+            fignum = plot_temps(fignum, cloud, include_names=['Tx','Ty','Tz'])
+            fignum = plot_psd(fignum, cloud)
+            fignum = plot_scalar_summary(fignum, cloud)
+
+            # show or save plots
+            #plt.show()
+            save_loc = os.path.join(params['plot_dir'],'mop_sim' +\
+                    params['suffix'] + '.pdf')
+            print('saving plots...')
+            multipage(save_loc, dpi=600)
+            print('plots saved to {}'.format(save_loc))
+        # Save the state of the cloud to disk
+        if save == True:
+            cloud.save()
+        temp_ratios[::, sim_num] = cloud.temps[-1]/cloud.temps[0]
+    return sweep_shape, sweep_vals_list, temp_ratios
+
+def process_sweep(sweep_shape, sweep_vals_list, temp_ratios):
+    shaper = [i for i in sweep_shape.values()]
+    sweep_params = [i for i in sweep_shape.keys()]
+    sweep_vals_list_flat = []
+
+    # grab the first component of the v0 vector to use as an axis
+    for sweep_vals in sweep_vals_list:
+        sv = [v if type(v) != list else v[0] for v in sweep_vals]
+        sweep_vals_list_flat.append(sv)
+
+    #sweep_vals_list_flat = np.asarray(sweep_vals_list_flat)
+    X, Y = np.meshgrid(*sweep_vals_list_flat)
+    ys, xs = sweep_vals_list_flat
+    Txs = temp_ratios[0].reshape(shaper)
+    Tys = temp_ratios[1].reshape(shaper)
+    Tzs = temp_ratios[2].reshape(shaper)
+    Ts  = temp_ratios[3].reshape(shaper)
+    TTs = [Txs, Tys, Tzs]
+
+    fignum=100
+    figs=[]
+    for label, T in zip(['Tx/Tx0', 'Ty/Ty0', 'Tz/Tz0'], TTs):
+        fig = plt.figure(fignum, figsize=(6,4))
+        ax = fig.add_subplot(1,1,1)
+        im = ax.imshow(T, interpolation=None, origin='lower', aspect='auto')
+
+        xticks = range(0, len(xs))
+        yticks = range(len(ys))
+
+        xticklabels = ["{:6.0f}".format(x) for x in xs[::4]]
+        yticklabels = ["{:6.0f}".format(y*1e-2*1e6) for y in ys]
+
+        ax.set_xticks(xticks)
+        ax.set_xticklabels(xticklabels)
+        ax.set_yticks(yticks)
+        ax.set_yticklabels(yticklabels)
+
+        ax.set_title(label)
+        ax.set_xlabel('delay [us]')
+        ax.set_ylabel('V0 [m/s]')
+        plt.colorbar(im)
+        fignum += 1
+        figs.append(fig)
+    save_loc = os.path.join('plots', 'mop_sim_T-ratios' + '.pdf')
+    print('saving plots...')
+    multipage(save_loc, figs=figs, dpi=600)
 
 if __name__ == '__main__':
-    cloud = run_sim(params)
-
+    pass
