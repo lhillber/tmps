@@ -6,11 +6,11 @@
 #
 # lhillberry@gmail.com
 #
-# Last updated 30 October 2017
+# Last updated 17 February 2018
 #
 # DESCRIPTION
 # ===========
-# This script enables dynamical simulation of Natoms = 100000+ particles with
+# This script enables dynamical simulation of Natom = 100000+ particles with
 # dipole moment mu and mass m interacting with an applied magnetic field B.
 # The particular field considered in this file is that of Helmholtz and
 # anti-Helmoltz coil pairs. This field is of interest because it provides an
@@ -124,30 +124,34 @@
 #
 
 # Import required libraries
-from itertools import cycle, product
+from itertools import product
+import hashlib
+import json
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import axes3d
 from mpl_toolkits.mplot3d import art3d
 from mpl_toolkits.mplot3d import proj3d
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
-from matplotlib.patches import Circle
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.ticker import NullFormatter, FormatStrFormatter
+from matplotlib.ticker import NullFormatter
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import numpy as np
 from numpy import pi
-from numpy.linalg import norm, inv
+from numpy.linalg import norm
 
 import scipy
-from scipy.interpolate import interpn, interp1d, RegularGridInterpolator
-import scipy.special as sl
 import matplotlib.animation as animation
+from scipy.stats import gaussian_kde
+from mpi4py import MPI
 
 import sys
 import os
 import pickle
 import traceback
+
+import magnetics as mag
 
 # The following two lines ensure type 1 fonts are used in saved pdfs
 mpl.rcParams['pdf.fonttype'] = 42
@@ -162,8 +166,6 @@ plt.rcParams.update(plt_params)
 # UNITS
 # =====
 # Input allnumbers in uits of: cm, us, mK, A, kg
-u0 = 1.257e-6 * 1e2 * 1e-12
-    # magnetic permiability, kg m A^-2 s^-2 cm/m s^2/us^2
 kB = 1.381e-23 * 1e4 * 1e-12 * 1e-3
     # Boltzmann's constant, kg m^2 s^-2 K^-1 cm^2/m^2 s^2/us^2 K/mk
 h  = 6.62607004e-34 * 1e4 * 1e-6
@@ -171,127 +173,30 @@ h  = 6.62607004e-34 * 1e4 * 1e-6
 rtube = 0.75 * 2.54 / 2
     # radius of slower tube, cm
 
-# MAGNETIC FIELDS
-# ===============
-# Field at point r due to current I running in loop raidus R centered at r0 with
-# normal vector n
-def Bloop(r, I, n, r0, R):
-    # coil frame to lab frame transformation and its inverse
-    r0 = np.array(r0)
-    n, l, m = coil_vecs(n)
-    trans = np.vstack((l,m,n))
-    inv_trans = inv(trans)
-
-    # Shift origin to coil center
-    r = r-r0
-
-    # transform field points to coil frame
-    r = np.dot(r, inv_trans)
-
-    # move to cylindrical coordinates for the coil
-    x = r[:,0]
-    y = r[:,1]
-    z = r[:,2]
-    rho = np.sqrt(x**2 + y**2)
-    phi = np.arctan2(y, x)
-    # elliptic integrals of first and second kind
-    E = sl.ellipe(4 * R * rho / ((R + rho )**2 + z**2))
-    K = sl.ellipk(4 * R * rho / ((R + rho )**2 + z**2))
-
-    # field values
-    Bz =  u0 * I / (2 * pi * np.sqrt((R + rho)**2 + z**2)) * (
-                K + E * (R**2 - rho**2 - z**2)/((R - rho)**2 + z**2) )
-
-    Brho = u0 * I * z / (2 * pi * rho * np.sqrt((R + rho)**2 + z**2)) * (
-               -K + E * (R**2 + rho**2 + z**2)/((R - rho)**2 + z**2) )
-
-    # Set field values on coil axis to zero instead of NaN or Inf
-    # (caused by a divide by 0)
-    Brho[np.isnan(Brho)] = 0.0
-    Brho[np.isinf(Brho)] = 0.0
-    Bz[np.isnan(Bz)]     = 0.0
-    Bz[np.isinf(Bz)]     = 0.0
-
-    # covert back to coil-cartesian coordinates then to lab coordinates
-    B = np.c_[np.cos(phi)*Brho, np.sin(phi)*Brho, Bz]
-    B = np.dot(B, trans)
-    return B
-
-# Field of N layers of M wire loops (wire diameter d) centered at r0
-# such that the first of M loops has its center at r0 and the Mth loop has its
-# center at r0 + M*d*n where n is the normal to the loops. The first loop of N
-# layers has radius R.
-def Bcoil(r, I, n, r0, R, d, M, N):
-    B = np.zeros_like(r)
-    for j in range(M):
-        for k in range(N):
-            B += Bloop(r, I, n, r0 + n*(j+1/2)*d, R + (k+1/2)*d)
-    return B
-
-# Field of two identical coils situated co-axially along loop-normal n, with the
-# closest loops of the two coils separated by 2A. Then, r0 is axial point
-# midway between the two coils. Current in the two coils flows in opposite
-# directions (anti-Helmholtz configuration)
-def BAH(r, I, n, r0, R, d, M, N, A):
-    r0a = r0 + n*A
-    r0b = r0 - n * (A + M * d)
-    return Bcoil(r, I, n, r0a, R, d, M, N)+\
-           Bcoil(r, -I, n, r0b, R, d, M, N)
-
-# Same as BHH but with currents of the two coils flowing in the same direction
-# (Helmholtz configuration)
-def BHH(r, I, n, r0, R, d, M, N, A):
-    r0a = r0 + n * A
-    r0b = r0 - n * (A + M * d)
-    return Bcoil(r, I, n, r0a, R, d, M, N)+\
-           Bcoil(r, I, n, r0b, R, d, M, N)
-
-# Field of anti-Helmholtz and Helmholtz coils for creating a biased gradient
-def Bmop(r, IAH, nAH, r0AH, RAH, dAH, MAH, NAH, AAH,
-            IHH, nHH, r0HH, RHH, dHH, MHH, NHH, AHH, **kwargs):
-    return BAH(r, IAH, nAH, r0AH, RAH, dAH, MAH, NAH, AAH) +\
-           BHH(r, IHH, nHH, r0HH, RHH, dHH, MHH, NHH, AHH)
-
-
-# HELPERS
-# =======
-
-# shape a vector field in grid form to point form
-def vec_shape(V, xshape, yshape, zshape):
-    Vx = V[::, 0]
-    Vy = V[::, 1]
-    Vz = V[::, 2]
-    Vx.shape = xshape
-    Vy.shape = yshape
-    Vz.shape = zshape
-    return Vx, Vy, Vz
-
-# generate 3 orthonormal basis vectors for the coil, the first being colinear to
-# the supplied vector n
-def coil_vecs(n):
-    # create two vectors perpindicular to n
-    if  np.abs(n[0]) == 1:
-        l = np.r_[n[2], 0, -n[0]]
-    else:
-        l = np.r_[0, n[2], -n[1]]
-    # normalize coil's normal vector
-    l = l/norm(l)
-    m = np.cross(n, l)
-    return n, l, m
+def extract_geometry(params):
+    geometry = {}
+    del_list = []
+    for k, v in params.items():
+        if k not in ('tag', 'r0_tag', 't0_tag', 'dt_tag',
+                 'pin_hole', 'r0_ph', 'D_ph', 'Tl', 'Tt', 'Natom', 'width',
+                 'r0_cloud', 'v0', 't0', 'Npulse', 'shape', 'tau',
+                 'tcharge', 'r0_detect', 'decay', 'tmax', 'dt', 'delay', 'seed',
+                 'plot_dir', 'data_dir', 'suffix', 'm' , 'mu', 'vrecoil',
+                 'optical_pumping'):
+            geometry[k] = v
+            del_list += [k]
+    for k in del_list:
+        del params[k]
+    return params, geometry
 
 def format_params(params):
-    params['r0AH'] = np.array(params['r0AH'])
-    params['r0HH'] = np.array(params['r0HH'])
-    params['nAH'] = np.array(params['nAH'])
-    params['nAH'] = params['nAH']/norm(params['nAH'])
-    params['nHH'] = np.array(params['nHH'])
-    params['nHH'] = params['nHH']/norm(params['nHH'])
     if params['delay'] == None:
-        if params['v0'][0] == 0:
+        if norm(params['v0']) == 0.0:
             params['delay'] = 0.0
         else:
-            params['delay'] = (abs(
-                    params['r0_cloud'][0])) / params['v0'][0]  # us
+            params['delay'] =\
+                (norm(params['r0_cloud']) - norm(params['width'])) /\
+                 norm(params['v0'])  # us
     if params['dt'] == None:
         params['dt'] = params['tau']/100  # us
     if params['tmax'] == None:
@@ -302,217 +207,16 @@ def format_params(params):
 
 # PLOTTING
 # ========
-def coil_viz(ax, n, r0, R, d, M, N, color=None):
-    if color is None:
-        c = cycle(['C' + str(i) for i in range(10)][:M*N])
-    else:
-       c =  cycle([color])
-    for j in range(M):
-        for k in range(N):
-            shift = r0 + n*(j+1/2)*d
-            rad = R + (k+1/2)*d
-            lw = linewidth_from_data_units(d, ax)
-            p = Circle((0,0), rad, edgecolor=next(c), lw=lw, ls='solid', fill=False)
-            ax.add_patch(p)
-            pathpatch_2d_to_3d(p, z = 0, normal = n)
-            pathpatch_translate(p, shift)
-
-def coil_pair_viz(ax, n, r0, R, d, M, N, A, color=None):
-    r0a = r0 + n * A
-    r0b = r0 - n * (A + M * d)
-    coil_viz(ax, n, r0a, R, d, M, N, color=color)
-    coil_viz(ax, n, r0b , R, d, M, N, color=color)
-
-def mop_viz(ax, nAH, r0AH, RAH, dAH, MAH, NAH, AAH,
-                nHH, r0HH, RHH, dHH, MHH, NHH, AHH,
-                colorAH=None, colorHH=None, **kwargs):
-    r0AHa = r0AH + nAH * AAH
-    r0AHb = r0AH - nAH * (AAH + MAH * dAH)
-    r0HHa = r0HH + nHH * AHH
-    r0HHb = r0HH - nHH * (AHH + MHH * dHH)
-    coil_pair_viz(ax, nAH, r0AH, RAH, dAH, MAH, NAH, AAH, color=colorAH)
-    coil_pair_viz(ax, nHH, r0HH, RHH, dHH, MHH, NHH, AHH, color=colorHH)
-
-
-# https://stackoverflow.com/questions/18228966/how-can-matplotlib-2d-patches-be-transformed-to-3d-with-arbitrary-normalsu
-def rotation_matrix(d):
-    """
-    Calculates a rotation matrix given a vector d. The direction of d
-    corresponds to the rotation axis. The length of d corresponds to 
-    the sin of the angle of rotation.
-    Variant of: http://mail.scipy.org/pipermail/numpy-discussion/2009-March/040806.html
-    """
-    sin_angle = norm(d)
-    if sin_angle == 0:
-        return np.identity(3)
-    d /= sin_angle
-    eye = np.eye(3)
-    ddt = np.outer(d, d)
-    skew = np.array([[    0,  d[2],  -d[1]],
-                  [-d[2],     0,  d[0]],
-                  [d[1], -d[0],    0]], dtype=np.float64)
-    M = ddt + np.sqrt(1 - sin_angle**2) * (eye - ddt) + sin_angle * skew
-    return M
-
-def pathpatch_2d_to_3d(pathpatch, z = 0, normal = 'z'):
-    """
-    Transforms a 2D Patch to a 3D patch using the given normal vector.
-    The patch is projected into they XY plane, rotated about the origin
-    and finally translated by z.
-    """
-    if type(normal) is str: #Translate strings to normal vectors
-        index = "xyz".index(normal)
-        normal = np.roll((1.0,0,0), index)
-    normal /= norm(normal) #Make sure the vector is normalised
-    path = pathpatch.get_path() #Get the path and the associated transform
-    trans = pathpatch.get_patch_transform()
-    path = trans.transform_path(path) #Apply the transform
-    pathpatch.__class__ = art3d.PathPatch3D #Change the class
-    pathpatch._code3d = path.codes #Copy the codes
-    pathpatch._facecolor3d = pathpatch.get_facecolor #Get the face color
-    verts = path.vertices #Get the vertices in 2D
-    d = np.cross(normal, (0, 0, 1)) #Obtain the rotation vector
-    M = rotation_matrix(d) #Get the rotation matrix
-    pathpatch._segment3d = np.array([
-        np.dot(M, (x, y, 0)) + (0, 0, z) for x, y in verts])
-
-def pathpatch_translate(pathpatch, delta):
-    """
-    Translates the 3D pathpatch by the amount delta.
-    """
-    pathpatch._segment3d += delta
-
-#https://stackoverflow.com/questions/19394505/matplotlib-expand-the-line-with-specified-width-in-data-unit
-def linewidth_from_data_units(linewidth, axis, reference='y'):
-    """
-    Convert a linewidth in data units to linewidth in points.
-    Parameters
-    ----------
-    linewidth: float
-        Linewidth in data units of the respective reference-axis
-    axis: matplotlib axis
-        The axis which is used to extract the relevant transformation
-        data (data limits and size must not change afterwards)
-    reference: string
-        The axis that is taken as a reference for the data width.
-        Possible values: 'x' and 'y'. Defaults to 'y'.
-    Returns
-    -------
-    linewidth: float
-        Linewidth in points
-    """
-    fig = axis.get_figure()
-    if reference == 'x':
-        length = fig.bbox_inches.width * axis.get_position().width
-        value_range = np.diff(axis.get_xlim())
-    elif reference == 'y':
-        length = fig.bbox_inches.height * axis.get_position().height
-        value_range = np.diff(axis.get_ylim())
-    # Convert length to points
-    length *= 72
-    # Scale linewidth to value range
-    return linewidth * (length / value_range)
-
-def plot_grad_norm_B(ax, grad_norm_B, X, Y, Z, I0,
-        skip=20, Bclip=2, min_frac=1, **kwargs):
-    print('plotting 3D gradient vectors...')
-    skip_slice = [slice(None, None, skip)]*3
-    dBdx, dBdy, dBdz = I0*np.asarray(grad_norm_B)*1e12
-    norm_gnB = np.sqrt(dBdx**2 + dBdy**2 + dBdz**2)
-    dBdx[norm_gnB > Bclip] = 0
-    dBdy[norm_gnB > Bclip] = 0
-    dBdz[norm_gnB > Bclip] = 0
-    norm_gnB[norm_gnB > Bclip] = Bclip
-    Bmin = np.min(norm_gnB) * min_frac
-    dBdx[norm_gnB < Bmin] = 0
-    dBdy[norm_gnB < Bmin] = 0
-    dBdz[norm_gnB < Bmin] = 0
-    norm_gnB[norm_gnB < Bmin] = Bmin
-    # plot the field and coils
-    ax.set_ylabel('y [cm]')
-    ax.set_xlabel('x [cm]')
-    ax.set_zlabel('z [cm]')
-    ax.quiver(X[skip_slice], Y[skip_slice], Z[skip_slice],
-        dBdx[skip_slice], dBdy[skip_slice], dBdz[skip_slice],
-        length=0.6, pivot='middle', lw=0.5)
-
-def plot_grad_norm_B_slices(fignum, cloud,
-        Bclip=3, min_frac=1, skip=25,**kwargs):
-    print('plotting gradient slices...')
-    grad_norm_B = cloud.grad_norm_B
-    x, y, z = cloud.xyz
-    I0 = cloud.params['I0']
-    fig = plt.figure(fignum, figsize=(6,4))
-    dBdx, dBdy, dBdz = I0*np.asarray(grad_norm_B)*1e12
-    # plot the field and coils
-    xinterp = RegularGridInterpolator((x,y,z), dBdx,
-        method='linear', bounds_error=False, fill_value=0)
-    yinterp = RegularGridInterpolator((x,y,z), dBdy,
-        method='linear', bounds_error=False, fill_value=0)
-    zinterp = RegularGridInterpolator((x,y,z), dBdz,
-        method='linear', bounds_error=False, fill_value=0)
-    for coordi, (coord, interp) in enumerate(zip(
-            [r'\rho', 'z'], [xinterp, zinterp])):
-        ax = fig.add_subplot(2,1,coordi+1)
-        ax.set_ylabel(r'$\partial |B|/\partial %s$ [T/cm]' % coord)
-        for slicei, rho in enumerate([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]):
-            label = r'${}$'.format(str(rho))
-            on = np.ones(len(z))*rho
-            off = np.zeros(len(z))
-            if coord in ('y'):
-                xs = np.vstack((off, on, z)).T
-            if coord in ('x', 'z', r'\rho'):
-                xs = np.vstack((on, off, z)).T
-            ax.xaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-            ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-            if coordi == 0:
-                ax.xaxis.set_major_formatter(NullFormatter())
-            if coordi != 0:
-                ax.set_xlabel(r'$z$ [cm]')
-            mask = np.logical_and(z>-0.75, z<0.75)
-            ax.plot(z[mask], interp(xs[mask]),label=label)
-    ax.legend(ncol=1, loc='lower left', bbox_to_anchor=[1,0.2],
-            handlelength=1, labelspacing=0.2, handletextpad=0.2)
-    ax.text(1.04, 1.65, r'$\rho$ [cm]', transform=ax.transAxes)
-    plt.subplots_adjust(hspace=0.0)
-    fignum += 1
-    return fignum
-
-def plot_B(ax, B, X, Y, Z, I0,
-        skip=20, Bclip=2, min_frac=1, **kwargs):
-    print('plotting 3D field vectors...')
-    skip_slice = [slice(None, None, skip)]*3
-    Bx, By, Bz = I0*np.asarray(grad_norm_B)*1e12
-    norm_gnB = np.sqrt(B**2 + B**2 + B**2)
-    Bx[norm_gnB > Bclip] = 0
-    By[norm_gnB > Bclip] = 0
-    Bz[norm_gnB > Bclip] = 0
-    norm_gnB[norm_gnB > Bclip] = Bclip
-    Bmin = np.min(norm_gnB) * min_frac
-    Bx[norm_gnB < Bmin] = 0
-    By[norm_gnB < Bmin] = 0
-    Bz[norm_gnB < Bmin] = 0
-    norm_gnB[norm_gnB < Bmin] = Bmin
-    # plot the field and coils
-    ax.set_ylabel('y [cm]')
-    ax.set_xlabel('x [cm]')
-    ax.set_zlabel('z [cm]')
-    ax.quiver(X[skip_slice], Y[skip_slice], Z[skip_slice],
-        Bx[skip_slice], By[skip_slice], Bz[skip_slice],
-        length=0.2, pivot='middle')
-    mop_viz(ax, **params)
-
-def plot_phase_space(fignum, cloud, time_indicies=[0, -1]):
+def plot_phase_space(fignum, sim, cloud, time_indicies=[0, -1]):
     print('plotting phase space slices...')
-    traj = cloud.traj
-    vels = cloud.vels
+    traj = sim.measures['traj'][::, cloud.keep_mask, ::]
+    vels = sim.measures['vels'][::, cloud.keep_mask, ::]
     for i, (coord, letter) in enumerate(
-            zip(('x', 'y', 'z'), ('(a)', '(b)', '(c)'))):
+            zip(('x', 'y', 'z'), ('', '', ''))):
         fig = plt.figure(fignum, figsize=(3,3))
         for j, (ti, label) in enumerate(zip(time_indicies, ['initial', 'final'])):
-            # the random data
-            x = traj[ti, ::, i]
-            y = vels[ti, ::, i] * 1e6 * 1e-2  # m/s
+            x = traj[ti, ::, i] - cloud.r0[i]
+            y = (vels[ti, ::, i] -cloud.v0[i])* 1e6 * 1e-2  # m/s
             nullfmt = NullFormatter()         # no labels
             # definitions for the axes
             left, width = 0.1, 0.65
@@ -532,12 +236,14 @@ def plot_phase_space(fignum, cloud, time_indicies=[0, -1]):
             alpha=0.5)
             # now determine nice limits by hand:
             xmax, ymax = np.max(np.fabs(x)), np.max(np.fabs(y))
-            binwidthx = 0.08
+            binwidthx = 0.025
             binwidthy = binwidthx * (ymax/xmax)
             limx = (int(xmax/binwidthx) + 1) * binwidthx
             limy = (int(ymax/binwidthy) + 1) * binwidthy
-            axScatter.set_xlim((-limx, limx))
-            axScatter.set_ylim((-limy, limy))
+            mx = np.mean(x)
+            my = np.mean(y)
+            axScatter.set_xlim((mx-limx, mx+limx))
+            axScatter.set_ylim((my-limy, my+limy))
             binsx = np.arange(-limx, limx + binwidthx, binwidthx)
             binsy = np.arange(-limy, limy + binwidthy, binwidthy)
             axHistx.hist(x, bins=binsx, alpha=0.7)
@@ -559,9 +265,51 @@ def plot_phase_space(fignum, cloud, time_indicies=[0, -1]):
         fignum+=1
     return fignum
 
-def plot_temps(fignum, cloud, include_names=['Tx','Ty','Tz','T']):
-    ts = cloud.ts
-    temps = cloud.temps
+def plot_integrated_density(fignum, sim, cloud):
+    print('plotting real space slices...')
+    traj = sim.measures['traj'][::, cloud.keep_mask, ::]
+    vels = sim.measures['vels'][::, cloud.keep_mask, ::]
+    coords = ('x', 'y', 'z')
+    fig = plt.figure(fignum, figsize=(6,3))
+    inds_list = [(0,2),(0,1)]
+    xyzs = [0, 0]
+    zmax = 0
+    for i, inds in enumerate(inds_list):
+        x, y = [traj[-1, ::, inds[0]], traj[-1, ::, inds[1]]]
+        xy = np.vstack([x, y])
+        z = gaussian_kde(xy)(xy)
+        # Sort the points by density
+        idx = z.argsort()
+        x, y, z = x[idx], y[idx], z[idx]
+        xyzs[i] = [x,y,z]
+        zmax_tmp = np.max(z)
+        if zmax_tmp > zmax:
+            zmax = zmax_tmp
+    for i, (xyz, inds) in enumerate(zip(xyzs, inds_list)):
+        x, y, z = xyz
+        ax = fig.add_subplot(1,2,i+1)
+        acoord, bcoord = coords[inds[0]], coords[inds[1]]
+        scatter = ax.scatter(x, y, c=z, s=10, edgecolor='', vmax=zmax)
+        ax.axhline(y=np.mean(y))
+        ax.set_xlabel(acoord)
+        ax.set_ylabel(bcoord)
+        x0, x1 = ax.get_xlim()
+        y0, y1 = [-2, 2]
+        ax.set_ylim([y0, y1])
+        ax.set_aspect(abs(x1-x0)/abs(y1-y0))
+    fig.subplots_adjust(wspace=0.5, right=0.8, top=0.9, bottom=0.1)
+    cbar_ax = fig.add_axes([0.83, 0.23, 0.03, 0.53])
+    cbar = fig.colorbar(scatter, cax=cbar_ax)
+    old_ticks = cbar.ax.get_yticklabels()
+    cbar_ticks = [ i for i in
+            map(lambda x: "{:1.1f}".format(float(x.get_text())), old_ticks)]
+    cbar.ax.set_yticklabels(cbar_ticks)
+    fignum+=1
+    return fignum
+
+def plot_temps(fignum, sim, cloud, include_names=['Tx','Ty','Tz','T'], logy=False):
+    ts = np.take(sim.ts, sim.detection_locs)
+    temps = sim.measures['temps']
     temp_names = cloud.temp_names
     figT = plt.figure(fignum, figsize=(3,3))
     axT = figT.add_subplot(1,1,1)
@@ -572,17 +320,27 @@ def plot_temps(fignum, cloud, include_names=['Tx','Ty','Tz','T']):
             use_label = '$T_{}$'.format(label[1])
             if label == 'T':
                 use_label = '$T$'
-            axT.semilogy(ts, temp, label=use_label, c=color, ls=line)
-        axT.set_xlabel('$t$ [$\mu$s]')
-        axT.set_ylabel('$T$ [mK]')
-    axT.legend()
+            if logy:
+                axT.semilogy(ts, temp, label=use_label, c=color, ls=line)
+            else:
+                axT.plot(ts, temp, label=use_label, c=color, ls=line)
+
+    #if logy:
+    #    axT.semilogy(ts, 370.47e-6 * np.ones_like(ts),
+    #            label='recoil', c=color, ls=line)
+    #else:
+    #    axT.plot(ts, temp, 370.47e-6 * np.ones_like(ts),
+    #            label='recoil', c=color, ls=line)
+    axT.set_xlabel('$t$ [$\mu$s]')
+    axT.set_ylabel('$T$ [mK]')
+    axT.legend(loc='upper right')
     fignum += 1
     #axT.text(-0.3, 1.01, '(d)', weight='bold', transform=axT.transAxes)
     return fignum
 
-def plot_psd(fignum, cloud):
-    ts = cloud.ts
-    psd = cloud.psd
+def plot_psd(fignum, sim, cloud):
+    ts = np.take(sim.ts, sim.detection_locs)
+    psd = sim.measures['psd']
     figPSD = plt.figure(fignum, figsize=(3,3))
     axPSD = figPSD.add_subplot(1,1,1)
     axPSD.plot(ts, psd, c='k')
@@ -591,12 +349,13 @@ def plot_psd(fignum, cloud):
     fignum += 1
     return fignum
 
-def plot_scalar_summary(fignum, cloud):
+def plot_scalar_summary(fignum, cloud, field):
     ts = cloud.ts
     temps = cloud.temps
-    dens = cloud.dens
-    psd  = cloud.psd
-    Is   = cloud.Is
+    dens  = cloud.dens
+    psd   = cloud.psd
+    Is    = cloud.params['IAH'] * np.array([
+                mag.curr_pulse(t, **cloud.params) for t in ts])
     temp_names = cloud.temp_names
     dens_names = cloud.dens_names
     fig = plt.figure(fignum, figsize=(5,5))
@@ -606,22 +365,29 @@ def plot_scalar_summary(fignum, cloud):
     axR = fig.add_subplot(2,2,4)
     axI.plot(ts, Is)
     axI.plot(ts,Is, label='current')
-    axI.legend()
+    axI.legend(loc='upper right',
+            handlelength=1, labelspacing=0.2, handletextpad=0.2)
     for label, den in zip(dens_names, dens.T):
         axD.plot(ts, den, label=label)
-    axD.legend()
+    axD.legend(ncol=2, loc='upper right',
+            handlelength=1, labelspacing=0.2,
+            handletextpad=0.2, columnspacing=0.4)
     for label, temp in zip(temp_names, temps.T):
         axT.plot(ts, temp, label=label)
-    axT.legend()
-    axR.plot(ts, psd, label='phase space density')
+    axT.legend(ncol=2, loc='upper right',
+            handlelength=1, labelspacing=0.2,
+            handletextpad=0.2, columnspacing=0.4)
+    axR.plot(ts, psd, label='PSD')
+    axR.legend(loc='upper right',
+         handlelength=1, labelspacing=0.2, handletextpad=0.2)
+    fig.subplots_adjust(wspace=0.4, hspace=0.4, right=0.9, top=0.9, bottom=0.1)
     return fignum
 
-def plot_traj(fignum, cloud, seglen=2):
-    traj             = cloud.traj
-    spins            = cloud.spins
-    xlim, ylim, zlim = cloud.xyzlim
-    X, Y, Z          = cloud.grid_list
-    grad_norm_B = cloud.grad_norm_B
+def plot_traj(fignum, sim, cloud, field, seglen=2):
+    traj             = sim.measures['traj'][::, cloud.keep_mask, ::]
+    spins            = cloud.spins[cloud.keep_mask]
+    xlim, ylim, zlim = field.xyzlim
+    X, Y, Z          = field.XYZ
     print('plotting 3D trajectory...')
     spin_color = ['red','black']
     fig = plt.figure(fignum, figsize=(8,8))
@@ -629,42 +395,44 @@ def plot_traj(fignum, cloud, seglen=2):
     ax.set_ylabel('y [cm]')
     ax.set_xlabel('x [cm]')
     ax.set_zlabel('z [cm]')
-    ax.set_xlim([-2,2])
+    #ax.set_xlim([-2,2])
     ax.set_ylim([-2,2])
     ax.set_zlim([-2,2])
-    ax.view_init(elev=10., azim=30)
-    marker_dict={1:u'$\u2193$', -1:u'$\u2191$'}
+    ax.view_init(elev=10., azim=80)
+    marker_dict = {1:u'$\u2193$', -1:u'$\u2191$'}
     Ntsteps = len(traj[::,0,0])
     alphas = np.linspace(1/Ntsteps, 1, int(Ntsteps))
+    mag.plot_3d(ax, field, grad_norm=True)
+    mag.geometry_viz(ax, field.geometry)
+    if cloud.pin_hole:
+        mag.loop_viz(ax,
+            n=np.array([1,0,0]),
+            r0=np.array(cloud.r0_ph),
+            R=cloud.D_ph/2,
+            d=0.05,
+            color='r'
+            )
     for j, spin in enumerate(spins):
-        if j < 1000:
+        if j < 100:
             x, y, z = traj[::,j,0], traj[::,j,1], traj[::,j,2]
             ax.plot(x, y, z, color=spin_color[int((spin) + 1/2)],
                     lw=1.2)
             ax.plot([x[-1]],[y[-1]],[z[-1]], color='k',
                 mew=0., alpha=0.9, marker=marker_dict[spin], ms=10)
 
-            for f in range(0, Ntsteps-seglen, seglen):
-                x, y, z = traj[f:f+seglen+1,j,0], traj[f:f+seglen+1,j,1],\
-                        traj[f:f+seglen+1,j,2]
-                #ax.plot(x, y, z, color=spin_color[int((spin) + 1/2)],
-                #    lw=1.2, alpha = alphas[f])
-            #ax.plot([x[-1]],[y[-1]],[z[-1]], color='k',
-            #    mew=0., alpha=0.9, marker=marker_dict[spin], ms=10)
+            #for f in range(0, Ntsteps-seglen, seglen):
+            #    x, y, z = traj[f:f+seglen+1,j,0], traj[f:f+seglen+1,j,1],\
+            #            traj[f:f+seglen+1,j,2]
         elif j > 100:
-            print('Only plotting trajectory for the first 1000 atoms')
+            print('only plotting trajectory for the first 100 atoms')
             break
-
-    if not grad_norm_B is None:
-        plot_grad_norm_B(ax, grad_norm_B, X, Y, Z, **cloud.params)
-    mop_viz(ax, **cloud.params)
     fignum+=1
     return fignum
 
 def animate_traj(fignum, cloud):
     ts = cloud.ts
-    traj = cloud.traj
-    spins = cloud.spins
+    traj = cloud.traj[::, cloud.keep_mask, ::]
+    spins = cloud.spins[cloud.keep_mask]
     xlim, ylim, zlim  = cloud.xyzlim
     plot_dir = cloud.params['plot_dir']
     suffix = cloud.params['suffix']
@@ -677,7 +445,7 @@ def animate_traj(fignum, cloud):
     aniax.set_ylim(*ylim)
     aniax.set_zlim(*zlim)
     # TODO: show scaled vector plot over time
-    # plot_grad_norm_B(aniax, grad_norm_B, X, Y, Z, **params)
+    # mag.plot_grad_norm_B(aniax, grad_norm_B, X, Y, Z, **params)
     # animate no more than 100 lines
     traj_transpose = np.transpose(traj,(1,2,0))[::,::,::]
     tail_length = (4/5)*len(ts)
@@ -842,84 +610,82 @@ class Vanishing_Line(object):
 # THERMODYNAMICS AND MECHANICS
 # ============================
 class Cloud():
-    def __init__(self, Natom, T, width, r0_cloud, m, mu, suffix,
-            v0, init_spins=None, seed=None, load=False, **kwargs):
+    def __init__(self, Natom, Tt, Tl, width, r0_cloud, m, mu, vrecoil, suffix,
+            v0, tag, r0_tag, t0_tag, dt_tag,
+            pin_hole, r0_ph, D_ph, seed=None, **kwargs):
+        self.suffix    = suffix
+        self.Natom     = Natom
+        self.seed      = seed
+        self.m         = m
+        self.mu        = mu
+        self.vrecoil   = vrecoil
+        self.Tt         = Tt
+        self.Tl         = Tl
+        self.width     = width
+        self.r0        = np.array(r0_cloud)
+        self.v0        = v0
+        self.pin_hole  = pin_hole
+        self.r0_ph     = np.array(r0_ph)
+        self.D_ph      = D_ph
+        self.tag       = tag
+        self.r0_tag    = r0_tag
+        self.t0_tag    = t0_tag
+        self.dt_tag    = dt_tag
+        # names of variables returned by get_temp and get_density.
+        self.temp_names = ('Tx', 'Ty', 'Tz', 'T ')
+        self.dens_names = ('Dx', 'Dy', 'Dz', 'D ')
+        self.initialize_state()
 
-        # http://stackoverflow.com/questions/1690400/getting-an-instance-name-inside-class-init
-        filename, line_number, function_name, text =\
-                traceback.extract_stack()[-2]
-
-        def_name    = text[:text.find('=')].strip()
-        self.name   = def_name
-        self.suffix = suffix
-
-        if load:
-            self.load()
-
-        else:
-            self.m         = m
-            self.mu        = mu
-            self.N         = Natom
-            self.T         = T
-            self.width     = width
-            self.r0        = r0_cloud
-            self.particles = np.zeros((self.N, 8))
-            self.xs        = self.particles[:, 0:3]
-            self.vs        = self.particles[:, 3:6]
-            self.spins     = self.particles[:, 6]
-            self.drop_mask = [False]*self.N
-            self.keep_mask = np.logical_not(self.drop_mask)
-
+    def initialize_state(self):
+        print('initializing cloud...')
+        self.xs        = np.zeros((self.Natom, 3))
+        self.vs        = np.zeros((self.Natom, 3))
+        self.spins     = np.zeros(self.Natom)
+        self.drop_mask = [False]*self.Natom
+        self.keep_mask = np.logical_not(self.drop_mask)
+        np.random.seed(self.seed)
+        self.spins[::] = np.random.choice([-1,1], size=self.Natom)
+        for n in range(10000):
+            if n==0:
+                mask = self.keep_mask
+                N = self.get_number()
+            elif n>0:
+                mask = self.drop_mask
+                N = self.Natom - self.get_number()
             for i in range(3):
-                np.random.seed(seed)
-                self.xs[:,i]   = np.random.normal(
-                        self.r0[i], self.width[i], self.N)
-                self.vs[:,i]  = maxwell_velocity(
-                        self.T, self.m, nc=self.N) + v0[i]
-
-            if init_spins == None:
-                np.random.seed(seed)
-                self.spins[::] = np.random.choice([-1,1], size=self.N)
+                if i in (1, 2):
+                    self.vs[mask,i] = maxwell_velocity(
+                        self.Tt, self.m, nc=N) + self.v0[i]
+                elif i == 0:
+                    self.vs[mask, i] = maxwell_velocity(
+                        self.Tl, self.m, nc=N) + self.v0[i]
+                self.xs[mask, i] = np.random.normal(
+                    self.r0[i], self.width[i], N)
+            if N == 0:
+                break
             else:
-                self.spins[::] = np.array([init_spins]*self.N)
+                if self.tag:
+                    self.drop_mask = self.tag_check()
+                    self.keep_mask = np.logical_not(self.drop_mask)
+                if self.pin_hole:
+                    self.drop_mask = np.logical_or(self.drop_mask,
+                                            self.pin_hole_check())
+                    self.keep_mask = np.logical_not(self.drop_mask)
 
-            # names of coordinates and their slices, callable from coord_dict
-            xs_c            = ((0,3,None), 'xs', 'pos')
-            vs_c            = ((3,6,None), 'vs', 'vel', 'vels')
-            s_c             =  (7, 's', 'spin', 'spins')
-            coords          = [xs_c, vs_c, s_c]
-            self.coord_dict = {k:coord[0] for coord in coords for k in coord}
+    def pin_hole_check(self):
+        ts = ((self.r0_ph - self.xs)/self.vs)[:,0]
+        ts = np.vstack([ts]*3).T
+        xs_ph = self.xs + self.vs * ts
+        r2 = xs_ph[::, 1]**2 + xs_ph[::, 2]**2
+        drop_mask = r2 > self.D_ph**2 / 4.0
+        return drop_mask
 
-            # names of variables returned by get_temp and get_density.
-            self.temp_names = ('Tx', 'Ty', 'Tz', 'T ')
-            self.dens_names = ('Dx', 'Dy', 'Dz', 'D ')
-            # available optical pumping in the z direction, position or velocity
-            self.typs       = ['vs', 'xa']
-
-    # save state of the class instance with name given by the class instance
-    # variable name (`cloud` by default)
-    def save(self):
-        # cloud.bin
-        name = self.name + self.suffix + '.bin'
-        print('saving simulation data to {}'.format(name))
-        file = open(name,'wb')
-        file.write(pickle.dumps(self.__dict__))
-        file.close()
-
-    # load state...
-    def load(self):
-        name = self.name + self.suffix + '.bin'
-        print('loading simulation data from {}'.format(name))
-        file = open(name,'rb')
-        dataPickle = file.read()
-        file.close()
-        self.__dict__ = pickle.loads(dataPickle)
-
-    def get_particles(self, coord):
-        return self.particles[::, slice(*self.coord_dict[coord])]
-
-    def set_particles(self, coord, val):
-        self.particles[::, slice(*self.coord_dict[coord])] = val
+    def tag_check(self):
+        ts = ((self.r0_tag - self.xs)/self.vs)[:,0]
+        t0 = np.mean(ts) + self.t0_tag
+        drop_mask = np.logical_or(t0 - self.dt_tag/2.0 > ts,
+                                        t0 + self.dt_tag/2.0 < ts)
+        return drop_mask
 
     def rk4(self, a, t, dt):
         mz = np.vstack([self.spins]*3).T
@@ -931,29 +697,40 @@ class Cloud():
         l3 = dt * (self.vs + k2/2)
         k4 = dt * mz * a(self.xs + l3, t + dt)
         l4 = dt * (self.vs + k3)
-        new_xs = self.xs + 1/6 * (l1 + 2*l2 + 2*l3 + l4)
-        old_xs = self.xs.copy()
-        new_vs = self.vs + 1/6 * (k1 + 2*k2 + 2*k3 + k4)
-        old_vs = self.vs.copy()
-        self.xs[::] = new_xs
-        # drop particles outside the following simulation volume
-        #self.drop_mask = np.all(np.vstack([np.abs(new_xs[::,0]) > rtube,\
-        #    new_xs[:,1]**2 +  new_xs[:,2] > rtube**2]), axis=0)
-        #self.xs[self.drop_mask] = old_xs[self.drop_mask]
-        self.vs[::] = new_vs
-        #self.vs[self.drop_mask] = old_vs[self.drop_mask]
+        self.xs[::] = self.xs + 1/6 * (l1 + 2*l2 + 2*l3 + l4)
+        self.vs[::] = self.vs + 1/6 * (k1 + 2*k2 + 2*k3 + k4)
+
+    def free_expand(self, expansion_time):
+            x1 = self.xs + expansion_time * self.vs
+            self.xs[::] = x1
 
     def optical_pump(self, mode):
         if mode in ('vs', 'vel', 'v'):
-            self.spins[::] = np.sign(self.vs[::,2])
+            self.spins[::] = np.sign(self.vs[::, 2])
         if mode in ('xs', 'pos', 'x'):
-            self.spins[::] = np.sign(self.xs[::,2])
+            self.spins[::] = np.sign(self.xs[::, 2])
+        if mode in (1, '1', 'up', 'HFS', 'hfs', 'minus'):
+            self.spins = -np.ones_like(self.xs[::,0])
+        if mode in (0, '0', 'down', 'LFS', 'lfs', 'plus'):
+            self.spins = np.random.choice([-1, 1], self.Natom, p=[0.2, 0.8])
+        self.recoil()
+
+    def recoil(self):
+        recoils = maxwell_velocity(370.47e-6, self.m, nc=3*self.Natom)
+        recoils = recoils.reshape(self.Natom, 3)
+        self.vs = self.vs + recoils
+
+    def get_xs(self):
+        return self.xs
+
+    def get_vs(self):
+        return self.vs
 
     def get_temp(self):
         c = self.m/kB
-        Tx = c*np.var(self.vs[self.keep_mask,0])
-        Ty = c*np.var(self.vs[self.keep_mask,1])
-        Tz = c*np.var(self.vs[self.keep_mask,2])
+        Tx = c*np.var(self.vs[self.keep_mask, 0])
+        Ty = c*np.var(self.vs[self.keep_mask, 1])
+        Tz = c*np.var(self.vs[self.keep_mask, 2])
         T  = (Tx  + Ty + Tz)/3
         return Tx, Ty, Tz, T
 
@@ -961,153 +738,51 @@ class Cloud():
         n = np.sum(self.keep_mask)
         return n
 
-    def get_density(self, correction=1e7):
+    def get_density(self, correction=1):
         n = self.get_number()
         Dx = n/(2*pi*np.var(self.xs[self.keep_mask, 0]))**(3/2)
         Dy = n/(2*pi*np.var(self.xs[self.keep_mask, 1]))**(3/2)
         Dz = n/(2*pi*np.var(self.xs[self.keep_mask, 2]))**(3/2)
         D = n / ( 2/3 * pi *
             np.sum(np.var(self.xs[self.keep_mask,::], axis=0), axis=0))**(3/2)
-        return Dx, Dy, Dz, D*correction
+        return Dx*correction, Dy*correction, Dz*correction, D*correction
 
-    def get_psd(self):
+    def get_psd(self, correction=1):
         Tx, Ty, Tz, T = self.get_temp()
-        Dx, Dy, Dz, D = self.get_density()
+        Dx, Dy, Dz, D = self.get_density(correction=correction)
         rho = D * (h**2/(2 * pi * self.m * kB * T))**(3/2)
         return rho
 
+    def get_centers(self):
+        Cx = np.mean(self.xs[self.keep_mask, 0])
+        Cy = np.mean(self.xs[self.keep_mask, 1])
+        Cz = np.mean(self.xs[self.keep_mask, 2])
+        return Cx, Cy, Cz
 
-def curr_pulse(t, Npulse, tcharge, delay, tau, I0, t0, shape, decay, **kwargs):
-    tprime = t - delay
-    limda = t0
-    limdb = t0 + tau
-    for p in range(Npulse):
-        shapes = {'sin': np.sin(pi * (tprime - limda) / tau), 'square': 1 }
-        if limda < tprime < limdb:
-            return I0/(decay)**p * shapes[shape]
-        limda += tau + tcharge
-        limdb += tau + tcharge
-    else:
-        return 0.0
+    def get_sigmas(self):
+        sigmax = np.std(self.xs[self.keep_mask, 0])
+        sigmay = np.std(self.xs[self.keep_mask, 1])
+        sigmaz = np.std(self.xs[self.keep_mask, 2])
+        return sigmax, sigmay, sigmaz
 
 def maxwell_velocity(T, m, seed=None, nc=3):
     np.random.seed(seed)
     # characteristic velocity of temperature T
-    v_ = (kB * T / m)**(1/2) # cm/us
+    v_ = (kB * T / m) ** (1/2) # cm/us
     if nc == 1:
-        return v_ * np.random.normal(0, 1)
+        return np.random.normal(0, v_)
     else:
-        return v_ * np.random.normal(0, 1, nc)
+        return np.random.normal(0, v_, nc)
 
-
-def make_grid(xmin, xmax, Nxsteps, ymin, ymax, Nysteps, zmin, zmax, Nzsteps,
-        **kwargs):
-    print('making solution grid...')
-    # grid spacing
-    dx = (xmax - xmin)/Nxsteps
-    dy = (ymax - ymin)/Nysteps
-    dz = (zmax - zmin)/Nzsteps
-    # axes
-    x = np.linspace(xmin, xmax, Nxsteps)
-    y = np.linspace(ymin, ymax, Nysteps)
-    z = np.linspace(zmin, zmax, Nzsteps)
-    # The grid of points on which we want to evaluate the field
-    grid_list = np.meshgrid(x, y, z)
-    X, Y, Z = grid_list
-    # grid shapes
-    xshape = X.shape
-    yshape = Y.shape
-    zshape = Z.shape
-    r = np.vstack(grid_list).reshape(3, -1).T
-    # convert grid coordinates to point form
-    #r = np.c_[X.ravel(), Y.ravel(), Z.ravel()]
-    # cubic limits for square aspect ratio in 3D plots
-    max_range = np.array([X.max()-X.min(),
-        Y.max()-Y.min(), Z.max()-Z.min()]).max() * 0.5
-    mid_x = (X.max()+X.min()) * 0.5
-    mid_y = (Y.max()+Y.min()) * 0.5
-    mid_z = (Z.max()+Z.min()) * 0.5
-    xlim = mid_x - max_range, mid_x + max_range
-    ylim = mid_y - max_range, mid_y + max_range
-    zlim = mid_z - max_range, mid_z + max_range
-    rr = np.vstack(np.meshgrid(x,y,z)).reshape(3,-1).T
-    return x,y,z, X,Y,Z, r, dx,dy,dz, xshape,yshape,zshape, xlim,ylim,zlim
-
-# unscaled for current
-def make_B(r, xshape, yshape, zshape, dx, dy, dz, B_statistics=False, **kwargs):
-    print('calculating field and gradient...')
-    # grid spacing
-    # mop field, shaped like r
-    B = Bmop(r, IAH=1, IHH=kwargs['HH_scale'], **kwargs)  # kg A^-1 us^-2
-
-    # grids of mop field components
-    Bx, By, Bz = vec_shape(B, xshape, yshape, zshape)
-
-    # grid of field magnitude and grids of its gradient
-    norm_B = np.sqrt(Bx**2 + By**2 + Bz**2)
-    grad_norm_B = np.gradient(norm_B, dx, dy, dz) # kg A^-1 us^-2 cm^-1
-    dBdx, dBdy, dBdz = grad_norm_B
-
-    if B_statistics:
-        # z gradient in control volume
-        dBdz_inside = dBdz[
-            int(xshape[0]/2)-int(rtube/dx):int(xshape[0]/2)+int(rtube/dx),
-            int(ysgape[0]/2)-int(rtube/dy):int(ysgape[0]/2)+int(rtube/dy),
-            int(zshape[0]/2)-int(rtube/dz):int(zshape[0])+int(rtube/dz)]
-
-        # gradient statistics inside control volume
-        grad_opt = (kB*params['T']*m)**(1/2)/(mu*params['tau'])
-        grad_center = dBdz[int(Nxsteps/2), int(Nxsteps/2), 0]
-        grad_mean = np.mean(dBdz_inside)
-        grad_max = np.max(dBdz_inside)
-
-        print( 'avg gradient supplied {} T/cm'.format(
-                params['I0'] * grad_mean * 1e12))
-
-        print('expected delta vz {} (central grad)'.format(
-            params['I0'] * grad_center * params['tau'] * mu / m * 1e6 * 1e-2))
-        print('expected delta vz {} (mean grad)'.format(
-            params['I0'] * grad_mean * params['tau'] * mu / m * 1e6 * 1e-2))
-        print('expected delta vz {} (max grad)'.format(
-            params['I0'] * grad_max  * params['tau'] * mu / m * 1e6 * 1e-2))
-        print('ideal delta vz {} (optimal grad)'.format(
-            grad_opt * params['tau'] * mu / m * 1e6 * 1e-2))
-        print('observed delta vz = {}'.format(
-            (np.mean(vels[-1,::,2]) - np.mean(vels[0,::,2])) * 1e-2 * 1e6))
-    return Bx, By, Bz, dBdx, dBdy, dBdz
-
-def make_acceleration(curr_pulse, xyz, grad_norm_B, params):
-    x, y, z = xyz
-    dBdx,dBdy, dBdz = grad_norm_B
-    def a(xs, t):
-        xinterp = RegularGridInterpolator((x,y,z), dBdx,
-            method='linear', bounds_error=False, fill_value=0)
-        yinterp = RegularGridInterpolator((x,y,z), dBdy,
-            method='linear', bounds_error=False, fill_value=0)
-        zinterp = RegularGridInterpolator((x,y,z), dBdz,
-            method='linear', bounds_error=False, fill_value=0)
-        dBdx_interp = xinterp(xs)
-        dBdy_interp = yinterp(xs)
-        dBdz_interp = zinterp(xs)
-        a_xyz = - params['mu'] / params['m'] * curr_pulse(t, **params) * np.c_[
-                dBdx_interp, dBdy_interp, dBdz_interp]
-        return a_xyz
-    return a
-
-# Default behavior
-# set load true to import previously saved data. If False, all other import
-# flags are ignored
-def run_sim(params_tmp,
-        load=False, save=True,
-        recalculate_B=False, resimulate=True, replot=True):
     # process supplied params dictonary which may contain lists of parameters,
     # signifying a parameter sweep.
+def process_experiment(params_tmp):
     params_list = []
     sweep_vals_list = []
     sweep_params=[]
     for k, v in params_tmp.items():
         # these parameters are a vectors, check if a list of them is supplied
-        if k in ('r0AH', 'r0HH', 'width', 'nAH', 'nHH', 'r0_cloud', 'v0'):
+        if k[0] == 'n' or k[:2] in ('r0', 'v0') or k == 'width':
             if type(v[0]) == list:
                 sweep_params.append(k)
                 sweep_vals_list.append(v)
@@ -1116,16 +791,15 @@ def run_sim(params_tmp,
             if type(v) == list:
                 sweep_params.append(k)
                 sweep_vals_list.append(v)
-    # dictinary of sweeped parameters as keys, their length as values
-    sweep_shape = {sweep_param:len(sweep_vals) for
-        sweep_param, sweep_vals in zip(sweep_params, sweep_vals_list)}
+    # list of 2-tuples with sweeped parameters first, their length second
+    sweep_shape = [(sweep_param, len(sweep_vals)) for
+        sweep_param, sweep_vals in zip(sweep_params, sweep_vals_list)]
     # Total number of simulations requested
-    num_sims = np.product([ i for i in sweep_shape.values()], dtype=int)
+    num_sims = np.product([s[1] for s in sweep_shape], dtype=int)
     # initialize final/initial ratios of temperatures, x, y, z, and average
-    temp_ratios = np.zeros((4, num_sims))
     if num_sims > 1:
         sim_num = 0
-        # ensure every a set of parameters is generated for every combination of
+        # ensure a set of parameters is generated for every combination of
         # simulation parameters
         sweep_vals_list_product = product(*sweep_vals_list)
         sweep_params_product = [sweep_params] * num_sims
@@ -1134,191 +808,327 @@ def run_sim(params_tmp,
             new_params = params_tmp.copy()
             for sweep_val, sweep_param in zip(sweep_vals, sweep_params):
                 new_params[sweep_param] = sweep_val
-                new_params['suffix'] = params_tmp['suffix'] + '-' + str(sim_num)
+                #new_params['suffix'] +=\
+                #    '_' + sweep_param + str(sweep_val)
             params_list.append(new_params)
             sim_num += 1
-
     else:
        params_list = [params_tmp]
+    return num_sims, params_list, sweep_vals_list, sweep_params, sweep_shape
 
-    # Run each simulation
+def experiment(params_tmp, recalc_B=False, resimulate=True,
+            save_simulations=True, verbose=True):
+    num_sims, params_list, sweep_vals_list, sweep_params, sweep_shape =\
+            process_experiment(params_tmp)
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    nprocs = comm.Get_size()
+    records = {'temps' : [], 'centers' : [], 'sigmas' : [] }
+    # loop through all requested simulations
+    if rank == 0:
+        print('\n Hello from rank 0! You are running {} jobs on {} cores...'\
+            .format(num_sims, nprocs))
     for sim_num, params in enumerate(params_list):
-        print(params['delay'], params['v0'])
-        print('BEGINING SIMULATION {} of {}'.format(sim_num, num_sims))
-        print()
+        if sim_num % nprocs == rank:
+            if verbose:
+                print()
+                print('SIMULATION {} OF {}:\r'.format(sim_num+1, num_sims))
+            sim = Simulation(params,
+                    recalc_B=recalc_B, save_simulations=save_simulations,
+                    verbose=verbose, resimulate=resimulate)
+            for measure_name in records.keys():
+                records[measure_name] += [sim.measures[measure_name][-1]]
+    if rank == 0:
+        return sweep_shape, sweep_vals_list, records
+
+
+# Default behavior
+# set load true to import previously saved data. If False, all other import
+# flags are ignored
+#
+class Simulation():
+    def __init__(self, params, recalc_B=False, resimulate=True,
+                 verbose=True, load_fname=None, save_simulations=True,
+                 detection_locs=None):
+        if recalc_B:
+            resimulate = True
+        self.params = params
+        self.uid = hashlib.sha1(json.dumps(params, sort_keys=True).encode(
+                'utf-8')).hexdigest()
+        self.fname = os.path.join(params['data_dir'], self.uid)
+        if not resimulate:
+            try:
+                self.load(fname=load_fname, recalc_B=recalc_B)
+            except(FileNotFoundError):
+                print('Simulation data not found')
+                resimulate = True
+        if resimulate:
+            params, geometry = extract_geometry(params)
+            self.geometry = geometry
+            params = format_params(params)
+            self.params = params
+            self.field = mag.Field(geometry, recalc_B=recalc_B)
+            self.cloud = Cloud(**params)
+            # resimulate=True time axis
+            ts = np.arange(params['delay'], params['tmax']+params['dt'], params['dt'])
+            ts = np.insert(ts, 0, 0.0)
+            Ntsteps = len(ts) + 1 # add one for final state after expansion
+            Natom = params['Natom']
+            self.Ntsteps = Ntsteps
+            self.Natom   = Natom
+            self.ts      = ts
+            if detection_locs == 'all':
+                self.detection_locs = np.arange(0, Ntsteps, 1)
+            elif detection_locs in (None, 'None', 'none'):
+                self.detection_locs = [0 , 1, Ntsteps - 2, Ntsteps -1]
+            else:
+                detection_locs = detection_locs
+            self.measures_map = {
+                                 'traj'   : self.cloud.get_xs,
+                                 'vels'   : self.cloud.get_vs,
+                                 'temps'  : self.cloud.get_temp,
+                                 'dens'   : self.cloud.get_density,
+                                 'psd'    : self.cloud.get_psd,
+                                 'centers': self.cloud.get_centers,
+                                 'sigmas' : self.cloud.get_sigmas}
+            self.init_sim()
+            self.run_sim(verbose=verbose)
+            if save_simulations:
+                self.save()
+
+    def save(self):
+        print('saving simulation data to {}'.format(self.fname))
+        # don't save field data here 
+        field = self.__dict__['field']
+        del self.__dict__['field']
+        file = open(self.fname,'wb')
+        file.write(pickle.dumps(self.__dict__))
+        file.close()
+        # keep field as attribute for plotting later
+        self.field = field
+
+    def load(self, recalc_B=False, fname=None):
+        print('loading simulation data from {}'.format(self.fname))
+        params = self.params
+        if fname is None:
+            fname = self.fname
+        file = open(fname,'rb')
+        dataPickle = file.read()
+        file.close()
+        self.__dict__ = pickle.loads(dataPickle)
+        params, geometry = extract_geometry(params)
+        self.geometry = geometry
         params = format_params(params)
-        for param, val in params.items():
-            print('{} = {}'.format(param, val))
-        print()
-        # instance of cloud class for each simulation
-        cloud = Cloud(**params, init_spins=None, load=load)
-        # time axis
-        ts = np.arange(params['t0'], params['tmax'], params['dt'])
-        Ntsteps = len(ts)
-        if not hasattr(cloud, 'grad_norm_B') or recalculate_B:
-            # electric current evaluated at all simulation times
-            Is = [curr_pulse(t, **params) for t in ts]
-            # make and characterize 3D grid
-            x,y,z, X,Y,Z, r, dx,dy,dz, xshape,yshape,zshape, xlim,ylim,zlim =\
-                make_grid(**params)
-            # get B field and grad of norm of B field (unscaled for current)
-            Bx, By, Bz, dBdx, dBdy, dBdz = make_B(r, xshape, yshape, zshape, dx, dy,
-            dz, **params)
+        self.field = mag.Field(geometry, recalc_B=recalc_B)
 
-            # load simulation data into the cloud class
-            cloud.params            = params
-            cloud.grid_list         = [X, Y, Z]
-            cloud.xyz               = [x, y, z]
-            cloud.r                 = r
-            cloud.dxyz              = [dx, dy, dz]
-            cloud.xyzshape          = [xshape, yshape, zshape]
-            cloud.xyzlim            = [xlim, ylim, zlim]
-            cloud.ts                = ts
-            cloud.Is                = Is
-            cloud.grad_norm_B       = [dBdx, dBdy, dBdz]
+    def update_measures(self, detection_idx):
+        for measure_name in self.measures_map.keys():
+            self.measures[measure_name][detection_idx] = self.measures_map[measure_name]()
 
-        if not hasattr(cloud, 'traj') or resimulate:
-            # make an acceleration function a(xs, t) for use in rk4
-            a = make_acceleration(curr_pulse, cloud.xyz,
-                    cloud.grad_norm_B, params)
-            # initialize memory for simulation measures
-            # real space trajectory
-            cloud.traj = np.zeros((Ntsteps, params['Natom'], 3))
-            # velocity space trajectory
-            cloud.vels = np.zeros((Ntsteps, params['Natom'], 3))
-            # x, y, z, and average temperatures
-            cloud.temps = np.zeros((Ntsteps, 4))
-            # x, y, z, and average densities
-            cloud.dens = np.zeros((Ntsteps, 4))
-            # phase space density
-            cloud.psd  = np.zeros(Ntsteps)
+    def init_measures(self):
+        Ndetections = len(self.detection_locs)
+        Natom = self.Natom
+        measures = dict(
+             traj   = np.zeros((Ndetections, Natom, 3)),
+             vels   = np.zeros((Ndetections, Natom, 3)),
+             temps    = np.zeros((Ndetections, 4)),
+             dens     = np.zeros((Ndetections, 4)),
+             psd      = np.zeros( Ndetections),
+             centers  = np.zeros((Ndetections, 3)),
+             sigmas   = np.zeros((Ndetections, 3)))
+        self.measures = measures
+        self.update_measures(0)
 
-            # run the time evolution
-            print()
-            ti = 0
-            # step forward through initial delay
-            # TODO: no need to rk4 this since there are no forces
-            for t in np.arange(params['t0'], params['delay'], params['dt']):
-                if ti < Ntsteps:
-                    cloud.rk4(a, t, params['dt'])
-                    cloud.traj[ti, ::, ::] = cloud.get_particles('xs')
-                    cloud.vels[ti, ::, ::] = cloud.get_particles('vs')
-                    cloud.temps[ti,::] = cloud.get_temp()
-                    cloud.dens[ti] = cloud.get_density()
-                    cloud.psd[ti] = cloud.get_psd()
-                    ti+=1
+    def init_sim(self):
+        Ntsteps = self.Ntsteps
+        Natom = self.Natom
+        self.init_measures()
+        # jump past any requested delay
+        # if delay = 0, the initial data is repeated at time step 2
+        self.cloud.free_expand(self.params['delay'])
+        self.update_measures(1)
 
+    def run_sim(self, verbose=True):
+            params = self.params
+            a = mag.make_acceleration(self.field, **self.params)
             # step forward through pulse sequence
-            ta = sum(params[tname] for tname in ('t0', 'delay'))
-            tb = sum(params[tname] for tname in ('t0', 'delay', 'tau', 'tcharge'))
+            ti = 2  # time step index
+            ta = params['delay']
+            tb = params['delay'] + params['tau'] + params['tcharge']
+            t_remain=1.0
             for p in range(params['Npulse']):
                 for t in np.arange(ta, tb, params['dt']):
-                    sys.stdout.write(' '*45 + 'simulating t = {:.2f} of {}\r'.format(t, params['tmax']))
-                    sys.stdout.flush()
-                    if  ta - params['dt']/2 < t < ta + params['dt']/2:
-                        typ = cloud.typs[0]
-                        print('PULSE {} BEGINS t = {}'.format(p+1, t))
-                        print('optically pumped t = {}'.format(t))
-                        cloud.optical_pump(typ)
-                    if ti < Ntsteps:
-                        cloud.rk4(a, t, params['dt'])
-                        cloud.traj[ti, ::, ::] = cloud.get_particles('xs')
-                        cloud.vels[ti, ::, ::] = cloud.get_particles('vs')
-                        cloud.temps[ti, ::] = cloud.get_temp()
-                        cloud.dens[ti] = cloud.get_density()
-                        cloud.psd[ti] = cloud.get_psd()
-
-                    if ta + params['tau']/2 - params['dt']/2 < t < ta + params['tau']/2 + params['dt']/2:
-                        print('current peaks t = {}\r'.format(t))
-
-                    if ta + params['tau'] - params['dt']/2 < t < ta + params['tau'] + params['dt']/2:
-                        print('Pulse {} ends t = {}\r'.format(p+1, t))
-                        print( 'temp | initl | final | ratio')
-                        print( '----------------------------')
-                        for label, temp in zip(cloud.temp_names, cloud.temps.T):
-                            print(  '  {} | {:>5.1f} | {:>5.1f} | {:<5.3f}'.format(
-                                label, temp[0], temp[ti], temp[ti]/temp[0]))
-                        print()
+                    if t_remain > 0:
+                        self.cloud.rk4(a, t, params['dt'])
+                        if ti in self.detection_locs:
+                            self.update_measures(self.detection_locs.index(ti))
+                        if verbose:
+                            sys.stdout.write(
+                                ' '*43 + 't = {:.2f} of {:.2f}\r'.format(
+                                    t, params['tmax']))
+                            sys.stdout.flush()
+                        if  ta - params['dt']/2 < t < ta + params['dt']/2:
+                            self.cloud.optical_pump(params['optical_pumping'])
+                            if verbose:
+                                print('pulse {} begins t = {:.2f}'.format(p+1, t))
+                                print('optically pumped t = {:.2f}'.format(t))
+                    elif t_remain < 0:
+                        print('detection truncates pulse...')
+                        break
+                    ts_remain = ((self.params['r0_detect'] - self.cloud.xs)/self.cloud.vs)[:,0]
+                    t_remain = np.mean(ts_remain)
+                    #if ta + params['tau'] - params['dt'] < t + params['dt']/2 < ta + params['tau']:
+                        # TO DO: print a better table. Show all measures
+                        #if verbose:
+                            #print()
+                            #print('Pulse {} ends t = {}\r'.format(p+1, t))
+                            #print( '  temp | initl | final | ratio')
+                            #print( '----------------------------')
+                            #for label, temp in zip(self.cloud.temp_names, self.cloud.temps.T):
+                            #    print(  '  {}   | {:>5.3f} | {:>5.3f} | {:<5.3f}'.format(
+                            #        label, temp[0], temp[ti], temp[ti]/temp[0]))
+                            #print()
                     ti += 1
-                ta = tb
+                ta = tb 
                 tb = ta + params['tau'] + params['tcharge']
-
-            cloud.Nremain = np.sum(cloud.keep_mask)
-            print('{}/{} atoms remain'.format(
-                    cloud.Nremain, params['Natom']))
-            print()
-
+            # final free expansion expansion
+            if t_remain > 0:
+                if verbose:
+                    print('Cloud expanding for {:.2f} us'.format(t_remain))
+                #self.cloud.free_expand(np.vstack([ts_remain]*3).T)
+                self.cloud.free_expand(t_remain)
+                self.update_measures(-1)
+            elif t_remain < 0:
+                #self.cloud.free_expand(t_remain)
+                self.update_measures(-1)
+            if verbose:
+                Nremain = np.sum(self.cloud.keep_mask)
+                print('{}/{} atoms remain'.format(
+                        Nremain, params['Natom']))
         # plotting
-        if not hasattr(cloud, 'traj') or\
-                not hasattr(cloud, 'grad_norm_B') or replot:
-            fignum = 0
+    def plot_measures(self, fignum=1, save=True, show=False):
+        if save or show:
+            cloud = self.cloud
+            field=self.field
+            fignum = fignum
             #fignum = animate_traj(fignum, cloud)
-            fignum = plot_grad_norm_B_slices(fignum, cloud)
-            fignum = plot_traj(fignum, cloud)
-            fignum = plot_phase_space(fignum, cloud)
-            fignum = plot_temps(fignum, cloud, include_names=['Tx','Ty','Tz'])
-            fignum = plot_psd(fignum, cloud)
-            fignum = plot_scalar_summary(fignum, cloud)
-
+            fignum = mag.plot_slices(fignum, field)
+            fignum = mag.plot_slices(fignum, field, grad_norm=True)
+            fignum = mag.plot_contour(fignum, field)
+            fignum = mag.plot_contour(fignum, field, grad_norm=True)
+            fignum = plot_traj(fignum, self, cloud, field)
+            fignum = plot_integrated_density(fignum, self, cloud)
+            #fignum = plot_phase_space(fignum, self, cloud)
+            fignum = plot_temps(fignum, self, cloud,
+                    logy=True, include_names=['Tx','Ty','Tz'])
+            fignum = plot_psd(fignum, self, cloud)
+            #fignum = plot_scalar_summary(fignum, cloud, field)
             # show or save plots
-            #plt.show()
-            save_loc = os.path.join(params['plot_dir'],'mop_sim' +\
-                    params['suffix'] + '.pdf')
-            print('saving plots...')
-            multipage(save_loc, dpi=600)
-            print('plots saved to {}'.format(save_loc))
-        # Save the state of the cloud to disk
-        if save == True:
-            cloud.save()
-        temp_ratios[::, sim_num] = cloud.temps[-1]/cloud.temps[0]
-    return sweep_shape, sweep_vals_list, temp_ratios
+        if show:
+            plt.show()
+        if save:
+            if show:
+                print('Cannot show and save plots.')
+            else:
+                save_loc = os.path.join(self.params['plot_dir'],'' +\
+                        self.params['suffix'] + '.pdf')
+                multipage(save_loc)
+                print('plots saved to {}'.format(save_loc))
 
-def process_sweep(sweep_shape, sweep_vals_list, temp_ratios):
-    shaper = [i for i in sweep_shape.values()]
-    sweep_params = [i for i in sweep_shape.keys()]
+
+
+# ANALYSIS
+# ========
+def scan_2d(sweep_shape, sweep_vals_list, records, plot_fname, unit='cm'):
+    # number of elements of each sweep parameter
+    shaper = [s[1] for s in sweep_shape]
+    # names of each sweep parameter
+    sweep_params = [s[0] for s in sweep_shape]
+    # grab the first component of vectors to use as an axis
+    # TODO: generalize
     sweep_vals_list_flat = []
-
-    # grab the first component of the v0 vector to use as an axis
     for sweep_vals in sweep_vals_list:
         sv = [v if type(v) != list else v[0] for v in sweep_vals]
         sweep_vals_list_flat.append(sv)
-
-    #sweep_vals_list_flat = np.asarray(sweep_vals_list_flat)
     X, Y = np.meshgrid(*sweep_vals_list_flat)
-    ys, xs = sweep_vals_list_flat
-    Txs = temp_ratios[0].reshape(shaper)
-    Tys = temp_ratios[1].reshape(shaper)
-    Tzs = temp_ratios[2].reshape(shaper)
-    Ts  = temp_ratios[3].reshape(shaper)
-    TTs = [Txs, Tys, Tzs]
+    xs, ys = sweep_vals_list_flat
+    xparam, yparam = sweep_params
+    figs=[]
+    fignum=100
+    labels = ['centers', 'sigmas', 'temps']
+    for label in labels:
+        for coordi, coord_label in enumerate(['x', 'y', 'z']):
+            record = np.asarray(records[label])[:, coordi]
+            full_label = ' '.join([label[:-1], coord_label])
+            record = record.reshape(shaper)
+            fig  = plt.figure(fignum, figsize=(6,4))
+            ax   = fig.add_subplot(1,1,1)
+            for line_label, line_data in zip(ys, record.T):
+                vals = line_data
+                if label != 'temps':
+                    if unit in ('inch', 'in'):
+                        vals = line_data * 0.3937
+                ax.plot(xs, vals, label=yparam +'  = ' + str(line_label))
+            ax.set_ylabel(full_label)
+            ax.set_xlabel(xparam)
+            plt.legend()
+            fignum += 1
+            figs.append(fig)
+    print('saving plots 2d scan analysis to', plot_fname)
+    multipage(plot_fname, figs=figs)
 
+        #tick_skip = 1
+        #xticks = range(0, len(xs), tick_skip)
+        #yticks = range(len(ys))
+        #xticklabels = ["{:6.0f}".format(x) for x in xs[::tick_skip]]
+        #yticklabels = ["{:6.0f}".format(y) for y in ys]
+        ##yticklabels = ["{:6.0f}".format(y*1e-2*1e6) for y in ys]
+        #ax.set_xticks(xticks)
+        #ax.set_xticklabels(xticklabels)
+        #ax.set_yticks(yticks)
+        #ax.set_yticklabels(yticklabels)
+        #ax.set_title(label)
+        #ax.set_xlabel(xparam)
+        #ax.set_ylabel(yparam)
+        ##ax.set_xlabel('delay [us]')
+        ##ax.set_ylabel('V0 [m/s]')
+        #fig.colorbar(im)
+
+
+def scan_1d(sweep_shape, sweep_vals_list, records, plot_fname):
+    # number of elements of each sweep parameter
+    shaper = [s[1] for s in sweep_shape]
+    # names of each sweep parameter
+    sweep_params = [s[0] for s in sweep_shape]
+    # grab the first component of vectors to use as an axis
+    # TODO: generalize
+    sweep_vals_list_flat = []
+    for sweep_vals in sweep_vals_list:
+        sv = [v if type(v) != list else v[0] for v in sweep_vals]
+        sweep_vals_list_flat.append(sv)
+    xs = sweep_vals_list_flat[0]
+    xparam, = sweep_params
     fignum=100
     figs=[]
-    for label, T in zip(['Tx/Tx0', 'Ty/Ty0', 'Tz/Tz0'], TTs):
-        fig = plt.figure(fignum, figsize=(6,4))
-        ax = fig.add_subplot(1,1,1)
-        im = ax.imshow(T, interpolation=None, origin='lower', aspect='auto')
+    labels = ['centers', 'sigmas', 'temps']
+    for label in labels:
+        for coordi, coord_label in enumerate(['x', 'y', 'z']):
+            record = np.asarray(records[label])[:, coordi]
+            full_label = ' '.join([label[:-1], coord_label])
+            record = record.reshape(shaper)
+            fig  = plt.figure(fignum, figsize=(6,4))
+            ax   = fig.add_subplot(1,1,1)
+            ax.plot(xs, record)
+            ax.set_ylabel(full_label)
+            ax.set_xlabel(xparam)
+            plt.legend()
+            fignum += 1
+            figs.append(fig)
+    print('saving plots 1d scan analysis to', plot_fname)
+    multipage(plot_fname, figs=figs)
 
-        xticks = range(0, len(xs))
-        yticks = range(len(ys))
-
-        xticklabels = ["{:6.0f}".format(x) for x in xs[::4]]
-        yticklabels = ["{:6.0f}".format(y*1e-2*1e6) for y in ys]
-
-        ax.set_xticks(xticks)
-        ax.set_xticklabels(xticklabels)
-        ax.set_yticks(yticks)
-        ax.set_yticklabels(yticklabels)
-
-        ax.set_title(label)
-        ax.set_xlabel('delay [us]')
-        ax.set_ylabel('V0 [m/s]')
-        plt.colorbar(im)
-        fignum += 1
-        figs.append(fig)
-    save_loc = os.path.join('plots', 'mop_sim_T-ratios' + '.pdf')
-    print('saving plots...')
-    multipage(save_loc, figs=figs, dpi=600)
+def process_sweep(sweep_shape, sweep_vals_list, records):
+    scan_2d(sweep_shape, sweep_vals_list, records)
 
 if __name__ == '__main__':
     pass
