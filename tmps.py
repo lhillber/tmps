@@ -143,7 +143,7 @@ from numpy.linalg import norm
 
 import scipy
 import matplotlib.animation as animation
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde, skew
 from mpi4py import MPI
 
 import sys
@@ -178,10 +178,11 @@ def extract_geometry(params):
     del_list = []
     for k, v in params.items():
         if k not in ('tag', 'r0_tag', 't0_tag', 'dt_tag',
-                 'pin_hole', 'r0_ph', 'D_ph', 'Tl', 'Tt', 'Natom', 'width',
-                 'r0_cloud', 'v0', 't0', 'Npulse', 'shape', 'tau',
+                 'pin_hole', 'r0_ph', 'D_ph', 
+                 'max_init', 'Tl', 'Tt', 'Natom', 'width',
+                 'r0_cloud', 'v0', 'Npulse', 'shape', 'tau',
                  'tcharge', 'r0_detect', 'decay', 'tmax', 'dt', 'delay', 'seed',
-                 'plot_dir', 'data_dir', 'suffix', 'm' , 'mu', 'vrecoil',
+                 'm' , 'mu', 'vrecoil',
                  'optical_pumping'):
             geometry[k] = v
             del_list += [k]
@@ -308,7 +309,7 @@ def plot_integrated_density(fignum, sim, cloud):
     return fignum
 
 def plot_temps(fignum, sim, cloud, include_names=['Tx','Ty','Tz','T'], logy=False):
-    ts = np.take(sim.ts, sim.detection_locs)
+    ts = np.take(sim.ts, sim.detection_time_steps)
     temps = sim.measures['temps']
     temp_names = cloud.temp_names
     figT = plt.figure(fignum, figsize=(3,3))
@@ -339,7 +340,7 @@ def plot_temps(fignum, sim, cloud, include_names=['Tx','Ty','Tz','T'], logy=Fals
     return fignum
 
 def plot_psd(fignum, sim, cloud):
-    ts = np.take(sim.ts, sim.detection_locs)
+    ts = np.take(sim.ts, sim.detection_time_steps)
     psd = sim.measures['psd']
     figPSD = plt.figure(fignum, figsize=(3,3))
     axPSD = figPSD.add_subplot(1,1,1)
@@ -434,8 +435,6 @@ def animate_traj(fignum, cloud):
     traj = cloud.traj[::, cloud.keep_mask, ::]
     spins = cloud.spins[cloud.keep_mask]
     xlim, ylim, zlim  = cloud.xyzlim
-    plot_dir = cloud.params['plot_dir']
-    suffix = cloud.params['suffix']
     print('animating trajectory...')
     # Set up formatting for the movie files
     # Attaching 3D axis to the figure
@@ -465,7 +464,6 @@ def animate_traj(fignum, cloud):
     Writer = animation.writers['ffmpeg']
     writer = Writer(fps=30,
             metadata=dict(artist='Logan Hillberry'), bitrate=-1)
-    save_loc = os.path.join(plot_dir,'traj'+suffix+'.mp4')
     line_ani.save(save_loc, writer=writer)
     fignum += 1
     return fignum
@@ -610,31 +608,32 @@ class Vanishing_Line(object):
 # THERMODYNAMICS AND MECHANICS
 # ============================
 class Cloud():
-    def __init__(self, Natom, Tt, Tl, width, r0_cloud, m, mu, vrecoil, suffix,
+    def __init__(self, Natom, max_init, Tt, Tl, width, r0_cloud, m, mu, vrecoil,
             v0, tag, r0_tag, t0_tag, dt_tag,
             pin_hole, r0_ph, D_ph, seed=None, **kwargs):
-        self.suffix    = suffix
-        self.Natom     = Natom
-        self.seed      = seed
-        self.m         = m
-        self.mu        = mu
-        self.vrecoil   = vrecoil
+        self.Natom      = Natom
+        self.seed       = seed
+        self.m          = m
+        self.mu         = mu
+        self.vrecoil    = vrecoil
+        self.max_init   = max_init
         self.Tt         = Tt
         self.Tl         = Tl
-        self.width     = width
-        self.r0        = np.array(r0_cloud)
-        self.v0        = v0
-        self.pin_hole  = pin_hole
-        self.r0_ph     = np.array(r0_ph)
-        self.D_ph      = D_ph
-        self.tag       = tag
-        self.r0_tag    = r0_tag
-        self.t0_tag    = t0_tag
-        self.dt_tag    = dt_tag
+        self.width      = width
+        self.r0         = np.array(r0_cloud)
+        self.v0         = v0
+        self.pin_hole   = pin_hole
+        self.r0_ph      = np.array(r0_ph)
+        self.D_ph       = D_ph
+        self.tag        = tag
+        self.r0_tag     = r0_tag
+        self.t0_tag     = t0_tag
+        self.dt_tag     = dt_tag
         # names of variables returned by get_temp and get_density.
         self.temp_names = ('Tx', 'Ty', 'Tz', 'T ')
         self.dens_names = ('Dx', 'Dy', 'Dz', 'D ')
-        self.initialize_state()
+        self.initialize_state() # creates init_profile
+        self.Ninit = self.init_profile[0] / self.Natom
 
     def initialize_state(self):
         print('initializing cloud...')
@@ -643,18 +642,23 @@ class Cloud():
         self.spins     = np.zeros(self.Natom)
         self.drop_mask = [False]*self.Natom
         self.keep_mask = np.logical_not(self.drop_mask)
+        self.init_profile = np.array([])
         np.random.seed(self.seed)
         self.spins[::] = np.random.choice([-1,1], size=self.Natom)
-        for n in range(10000):
+        for n in range(self.max_init):
+            first=True
+            Nkeep = self.get_number()
+            Ndrop = self.Natom - self.get_number()
             if n==0:
+                N = Nkeep
                 mask = self.keep_mask
-                N = self.get_number()
             elif n>0:
+                N = Ndrop
                 mask = self.drop_mask
-                N = self.Natom - self.get_number()
+                self.init_profile = np.append(self.init_profile, [Nkeep])
             for i in range(3):
                 if i in (1, 2):
-                    self.vs[mask,i] = maxwell_velocity(
+                    self.vs[mask, i] = maxwell_velocity(
                         self.Tt, self.m, nc=N) + self.v0[i]
                 elif i == 0:
                     self.vs[mask, i] = maxwell_velocity(
@@ -665,19 +669,39 @@ class Cloud():
                 break
             else:
                 if self.tag:
-                    self.drop_mask = self.tag_check()
-                    self.keep_mask = np.logical_not(self.drop_mask)
+                    if first:
+                        self.drop_mask = self.tag_check()
+                        first =False
+                    else:
+                        self.drop_mask = np.logical_or(
+                            self.drop_mask,
+                            self.tag_check())
                 if self.pin_hole:
-                    self.drop_mask = np.logical_or(self.drop_mask,
-                                            self.pin_hole_check())
-                    self.keep_mask = np.logical_not(self.drop_mask)
+                    if first:
+                        self.drop_mask = self.pin_hole_check(
+                                self.r0_ph, self.D_ph)
+                        first = False
+                    else:
+                        self.drop_mask = np.logical_or(
+                            self.drop_mask,
+                            self.pin_hole_check(self.r0_ph, self.D_ph))
+                self.keep_mask = np.logical_not(self.drop_mask)
 
-    def pin_hole_check(self):
-        ts = ((self.r0_ph - self.xs)/self.vs)[:,0]
+    def pin_hole_check(self, r0, D):
+        ts = ((r0 - self.xs)/self.vs)[:,0]
         ts = np.vstack([ts]*3).T
         xs_ph = self.xs + self.vs * ts
         r2 = xs_ph[::, 1]**2 + xs_ph[::, 2]**2
-        drop_mask = r2 > self.D_ph**2 / 4.0
+        drop_mask = r2 > D**2 / 4.0
+        return drop_mask
+
+    # untested
+    def slit_check(self):
+        ts = ((self.r0_slit - self.xs)/self.vs)[:,0]
+        ts = np.vstack([ts]*3).T
+        xs_slit = self.xs + self.vs * ts
+        y_slit, z_slit = np.abs(xs_slit[::, 1]) + np.abs(xs_slit[::, 2])
+        drop_mask = np.logical_or(y_slit > self.W_slit, z_slit > self.L_slit)
         return drop_mask
 
     def tag_check(self):
@@ -765,6 +789,12 @@ class Cloud():
         sigmaz = np.std(self.xs[self.keep_mask, 2])
         return sigmax, sigmay, sigmaz
 
+    def get_skews(self):
+        skewx = skew(self.xs[self.keep_mask, 0])
+        skewy = skew(self.xs[self.keep_mask, 1])
+        skewz = skew(self.xs[self.keep_mask, 2])
+        return skewx, skewy, skewz
+
 def maxwell_velocity(T, m, seed=None, nc=3):
     np.random.seed(seed)
     # characteristic velocity of temperature T
@@ -808,54 +838,71 @@ def process_experiment(params_tmp):
             new_params = params_tmp.copy()
             for sweep_val, sweep_param in zip(sweep_vals, sweep_params):
                 new_params[sweep_param] = sweep_val
-                #new_params['suffix'] +=\
-                #    '_' + sweep_param + str(sweep_val)
             params_list.append(new_params)
             sim_num += 1
     else:
        params_list = [params_tmp]
     return num_sims, params_list, sweep_vals_list, sweep_params, sweep_shape
 
+# partition list into n parts
+def chunks(l, n):
+    for i in range(0, len(l), n):
+        yield l[i:i + n]
+
 def experiment(params_tmp, recalc_B=False, resimulate=True,
             save_simulations=True, verbose=True):
-    num_sims, params_list, sweep_vals_list, sweep_params, sweep_shape =\
-            process_experiment(params_tmp)
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     nprocs = comm.Get_size()
-    records = {'temps' : [], 'centers' : [], 'sigmas' : [] }
-    # loop through all requested simulations
     if rank == 0:
+        num_sims, params_list, sweep_vals_list, sweep_params, sweep_shape =\
+            process_experiment(params_tmp)
+        pparams_list = list(chunks(params_list, 1+int(num_sims/nprocs)))
         print('\n Hello from rank 0! You are running {} jobs on {} cores...'\
             .format(num_sims, nprocs))
-    for sim_num, params in enumerate(params_list):
-        if sim_num % nprocs == rank:
-            if verbose:
-                print()
-                print('SIMULATION {} OF {}:\r'.format(sim_num+1, num_sims))
-            sim = Simulation(params,
-                    recalc_B=recalc_B, save_simulations=save_simulations,
-                    verbose=verbose, resimulate=resimulate)
-            for measure_name in records.keys():
+    else:
+        pparams_list    = None
+        sweep_shape     = None
+        sweep_vals_list = None
+        flat_records    = None
+    pparams_list = comm.scatter(pparams_list, root=0)
+    num_sims = len(pparams_list)
+    records = {'temps'   : [],
+               'centers' : [],
+               'sigmas'  : [],
+               'skews'   : [],
+               'Ninit'   : []}
+    # loop through all requested simulations
+    for sim_num, params in enumerate(pparams_list):
+        if verbose:
+            print('\n RANK {} SIMULATION {} OF {}:\r'.format(
+                    rank, sim_num+1, num_sims))
+        sim = Simulation(params,
+                recalc_B=recalc_B, save_simulations=save_simulations,
+                verbose=verbose, resimulate=resimulate)
+        records['Ninit'] += [sim.cloud.Ninit]
+        for measure_name in records.keys():
+            if measure_name != 'Ninit':
                 records[measure_name] += [sim.measures[measure_name][-1]]
+    all_records = comm.gather(records, root=0)
     if rank == 0:
-        return sweep_shape, sweep_vals_list, records
-
+        flat_records = all_records[0]
+        for k, v in flat_records.items():
+            for record in all_records[1:]:
+                v.extend(record[k])
+    return sweep_shape, sweep_vals_list, flat_records, rank
 
 # Default behavior
-# set load true to import previously saved data. If False, all other import
-# flags are ignored
-#
 class Simulation():
     def __init__(self, params, recalc_B=False, resimulate=True,
                  verbose=True, load_fname=None, save_simulations=True,
-                 detection_locs=None):
+                 detection_time_steps=None, data_dir='data'):
         if recalc_B:
             resimulate = True
         self.params = params
         self.uid = hashlib.sha1(json.dumps(params, sort_keys=True).encode(
                 'utf-8')).hexdigest()
-        self.fname = os.path.join(params['data_dir'], self.uid)
+        self.fname = os.path.join(data_dir, self.uid)
         if not resimulate:
             try:
                 self.load(fname=load_fname, recalc_B=recalc_B)
@@ -869,20 +916,20 @@ class Simulation():
             self.params = params
             self.field = mag.Field(geometry, recalc_B=recalc_B)
             self.cloud = Cloud(**params)
-            # resimulate=True time axis
-            ts = np.arange(params['delay'], params['tmax']+params['dt'], params['dt'])
+            ts = np.arange(params['delay'],
+                    params['tmax'] + params['dt'], params['dt'])
             ts = np.insert(ts, 0, 0.0)
             Ntsteps = len(ts) + 1 # add one for final state after expansion
             Natom = params['Natom']
             self.Ntsteps = Ntsteps
             self.Natom   = Natom
             self.ts      = ts
-            if detection_locs == 'all':
-                self.detection_locs = np.arange(0, Ntsteps, 1)
-            elif detection_locs in (None, 'None', 'none'):
-                self.detection_locs = [0 , 1, Ntsteps - 2, Ntsteps -1]
+            if detection_time_steps == 'all':
+                self.detection_time_steps = np.arange(0, Ntsteps, 1)
+            elif detection_time_steps in (None, 'None', 'none'):
+                self.detection_time_steps = [0 , 1, Ntsteps - 2, Ntsteps -1]
             else:
-                detection_locs = detection_locs
+                detection_time_steps = detection_time_steps
             self.measures_map = {
                                  'traj'   : self.cloud.get_xs,
                                  'vels'   : self.cloud.get_vs,
@@ -890,6 +937,7 @@ class Simulation():
                                  'dens'   : self.cloud.get_density,
                                  'psd'    : self.cloud.get_psd,
                                  'centers': self.cloud.get_centers,
+                                 'skews'  : self.cloud.get_skews,
                                  'sigmas' : self.cloud.get_sigmas}
             self.init_sim()
             self.run_sim(verbose=verbose)
@@ -926,15 +974,16 @@ class Simulation():
             self.measures[measure_name][detection_idx] = self.measures_map[measure_name]()
 
     def init_measures(self):
-        Ndetections = len(self.detection_locs)
+        Ndetections = len(self.detection_time_steps)
         Natom = self.Natom
         measures = dict(
-             traj   = np.zeros((Ndetections, Natom, 3)),
-             vels   = np.zeros((Ndetections, Natom, 3)),
+             traj     = np.zeros((Ndetections, Natom, 3)),
+             vels     = np.zeros((Ndetections, Natom, 3)),
              temps    = np.zeros((Ndetections, 4)),
              dens     = np.zeros((Ndetections, 4)),
              psd      = np.zeros( Ndetections),
              centers  = np.zeros((Ndetections, 3)),
+             skews    = np.zeros((Ndetections, 3)),
              sigmas   = np.zeros((Ndetections, 3)))
         self.measures = measures
         self.update_measures(0)
@@ -948,6 +997,22 @@ class Simulation():
         self.cloud.free_expand(self.params['delay'])
         self.update_measures(1)
 
+    def tof_detection(self, rbeam=0.0635, dt=0.1):
+        rbeam2 = rbeam**2
+        vs = self.cloud.vs
+        dzs = np.arange(-2.5, 2.5, rbeam)
+        Ntsteps = 3000
+        signals = np.zeros((len(dzs), Ntsteps))
+        for zi, dz in enumerate(dzs):
+            xs = self.params['r0_detect'] - self.cloud.xs
+            for ti in range(Ntsteps):
+                r2 = xs[::, 0]**2 + (dz - xs[::, 2])**2
+                detectable = r2 <= rbeam2
+                val = float(np.sum(detectable))
+                signals[zi, ti] = val
+                xs = xs + vs * dt
+        return signals
+
     def run_sim(self, verbose=True):
             params = self.params
             a = mag.make_acceleration(self.field, **self.params)
@@ -955,13 +1020,16 @@ class Simulation():
             ti = 2  # time step index
             ta = params['delay']
             tb = params['delay'] + params['tau'] + params['tcharge']
-            t_remain=1.0
+
+            ts_remain = ((self.params['r0_detect'] - self.cloud.xs)/self.cloud.vs)[:,0]
+            t_remain = np.mean(ts_remain)
             for p in range(params['Npulse']):
                 for t in np.arange(ta, tb, params['dt']):
                     if t_remain > 0:
                         self.cloud.rk4(a, t, params['dt'])
-                        if ti in self.detection_locs:
-                            self.update_measures(self.detection_locs.index(ti))
+                        if ti in self.detection_time_steps:
+                            self.update_measures(
+                                self.detection_time_steps.index(ti))
                         if verbose:
                             sys.stdout.write(
                                 ' '*43 + 't = {:.2f} of {:.2f}\r'.format(
@@ -992,21 +1060,24 @@ class Simulation():
                 ta = tb 
                 tb = ta + params['tau'] + params['tcharge']
             # final free expansion expansion
-            if t_remain > 0:
+            if t_remain >= 0:
                 if verbose:
                     print('Cloud expanding for {:.2f} us'.format(t_remain))
-                #self.cloud.free_expand(np.vstack([ts_remain]*3).T)
                 self.cloud.free_expand(t_remain)
+                #signals = self.tof_detection()
+                #plt.imshow(signals, aspect='auto', extent=(t_remain, t_remain+3000*0.1, -2.5, 2.5))
+                #plt.show()
                 self.update_measures(-1)
             elif t_remain < 0:
-                #self.cloud.free_expand(t_remain)
+                print('back propagating to detectin')
+                self.cloud.free_expand(t_remain)
                 self.update_measures(-1)
             if verbose:
                 Nremain = np.sum(self.cloud.keep_mask)
                 print('{}/{} atoms remain'.format(
                         Nremain, params['Natom']))
-        # plotting
-    def plot_measures(self, fignum=1, save=True, show=False):
+    # plotting
+    def plot_measures(self, plot_fname, fignum=1, save=True, show=False):
         if save or show:
             cloud = self.cloud
             field=self.field
@@ -1018,7 +1089,7 @@ class Simulation():
             fignum = mag.plot_contour(fignum, field, grad_norm=True)
             fignum = plot_traj(fignum, self, cloud, field)
             fignum = plot_integrated_density(fignum, self, cloud)
-            #fignum = plot_phase_space(fignum, self, cloud)
+            fignum = plot_phase_space(fignum, self, cloud)
             fignum = plot_temps(fignum, self, cloud,
                     logy=True, include_names=['Tx','Ty','Tz'])
             fignum = plot_psd(fignum, self, cloud)
@@ -1030,15 +1101,49 @@ class Simulation():
             if show:
                 print('Cannot show and save plots.')
             else:
-                save_loc = os.path.join(self.params['plot_dir'],'' +\
-                        self.params['suffix'] + '.pdf')
-                multipage(save_loc)
+                multipage(plot_fname)
                 print('plots saved to {}'.format(save_loc))
 
 
 
 # ANALYSIS
 # ========
+
+def scan_3d(sweep_shape, sweep_vals_list, records, plot_fname, unit='cm'):
+    # number of elements of each sweep parameter
+    shaper = [s[1] for s in sweep_shape]
+    # names of each sweep parameter
+    sweep_params = [s[0] for s in sweep_shape]
+    # grab the first component of vectors to use as an axis
+    # TODO: generalize
+    sweep_vals_list_flat = []
+    for sweep_vals in sweep_vals_list:
+        sv = [v if type(v) != list else v[0] for v in sweep_vals]
+        sweep_vals_list_flat.append(sv)
+    X, Y, Z = np.meshgrid(*sweep_vals_list_flat)
+    xs, ys, zs = sweep_vals_list_flat
+    xparam, yparam, zparam = sweep_params
+    figs=[]
+    fignum=100
+    for coordi, coord_label in enumerate(['x', 'y', 'z']):
+        fig  = plt.figure(fignum, figsize=(6,4))
+        ax   = fig.add_subplot(1,1,1)
+        record = np.asarray(records['sigmas'])[:, coordi]
+        record = record.reshape(shaper)
+        for yi in range(shaper[1]):
+            ms = []
+            for xi in range(shaper[0]):
+                s = record[xi, yi, ::]
+                m, b = np.polyfit(zs, s, 1)
+                ms += [m]
+            ax.plot(xs, ms, label=ys[yi])
+        plt.legend()
+        fignum += 1
+        figs.append(fig)
+    print('saving plots 2d scan analysis to', plot_fname)
+    multipage(plot_fname, figs=figs)
+
+
 def scan_2d(sweep_shape, sweep_vals_list, records, plot_fname, unit='cm'):
     # number of elements of each sweep parameter
     shaper = [s[1] for s in sweep_shape]
@@ -1055,25 +1160,39 @@ def scan_2d(sweep_shape, sweep_vals_list, records, plot_fname, unit='cm'):
     xparam, yparam = sweep_params
     figs=[]
     fignum=100
-    labels = ['centers', 'sigmas', 'temps']
+    labels = ['centers', 'sigmas', 'skews', 'temps', 'Ninit']
     for label in labels:
-        for coordi, coord_label in enumerate(['x', 'y', 'z']):
-            record = np.asarray(records[label])[:, coordi]
-            full_label = ' '.join([label[:-1], coord_label])
+        if label == 'Ninit':
+            record = np.asarray(records[label])
             record = record.reshape(shaper)
+            full_label = label
             fig  = plt.figure(fignum, figsize=(6,4))
             ax   = fig.add_subplot(1,1,1)
             for line_label, line_data in zip(ys, record.T):
-                vals = line_data
-                if label != 'temps':
-                    if unit in ('inch', 'in'):
-                        vals = line_data * 0.3937
-                ax.plot(xs, vals, label=yparam +'  = ' + str(line_label))
+                ax.plot(xs, line_data, label=yparam +'  = ' + str(line_label))
             ax.set_ylabel(full_label)
             ax.set_xlabel(xparam)
             plt.legend()
             fignum += 1
             figs.append(fig)
+        elif label in ('centers', 'sigmas', 'skews', 'temps'):
+            for coordi, coord_label in enumerate(['x', 'y', 'z']):
+                record = np.asarray(records[label])[:, coordi]
+                record = record.reshape(shaper)
+                full_label = ' '.join([label[:-1], coord_label])
+                fig  = plt.figure(fignum, figsize=(6,4))
+                ax   = fig.add_subplot(1,1,1)
+                for line_label, line_data in zip(ys, record.T):
+                    vals = line_data
+                    if label != 'temps':
+                        if unit in ('inch', 'in'):
+                            vals = line_data * 0.3937
+                    ax.plot(xs, vals, label=yparam +'  = ' + str(line_label))
+                ax.set_ylabel(full_label)
+                ax.set_xlabel(xparam)
+                plt.legend()
+                fignum += 1
+                figs.append(fig)
     print('saving plots 2d scan analysis to', plot_fname)
     multipage(plot_fname, figs=figs)
 
@@ -1110,7 +1229,7 @@ def scan_1d(sweep_shape, sweep_vals_list, records, plot_fname):
     xparam, = sweep_params
     fignum=100
     figs=[]
-    labels = ['centers', 'sigmas', 'temps']
+    labels = ['centers', 'sigmas', 'skews', 'temps']
     for label in labels:
         for coordi, coord_label in enumerate(['x', 'y', 'z']):
             record = np.asarray(records[label])[:, coordi]

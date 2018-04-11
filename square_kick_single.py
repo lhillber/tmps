@@ -26,6 +26,12 @@ params = dict(
     t0_tag = 0,
     dt_tag = 5,
 
+    # tagging
+    tag = True,
+    r0_tag = [-3, 0, 0],
+    t0_tag = 0,
+    dt_tag = 5,
+
     # current pulse params
     IHH      = 0,  # max current, A
     IAH      = 0,  # max current, A
@@ -33,7 +39,7 @@ params = dict(
     shape    = 'sin', # pulse shape, sin or square
     tau      = 100,   # discharge time, us
     tcharge  = 0,     # recharge time,  us
-    tof      = 1054,
+    r0_detect= [52.7, 0.0, 0.0],  # longitudinal location of detection, cm
     decay    = 1.5,   # factor to decreasue I0 each pulse
     # `None` uses defualt calculated values in `format_params`
     tmax     = None,  # max time (see format_params), us
@@ -81,11 +87,6 @@ params = dict(
 
     # random number generator seed = None for random initialization
     seed     = None,
-    # relative or absolute path to dir where plots are to be saved (must exist)
-    plot_dir = 'plots',
-    data_dir = 'data',
-    # suffix or version number appended to plot file names
-    suffix   = 'single'
     )
 
 # DO IT!

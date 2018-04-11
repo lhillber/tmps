@@ -10,8 +10,10 @@ params = dict(
         # particle mass, kg
     mu = 9.274e-24 * 1e4,
         # particle magnetic moment, A m^2 cm^2/ m^2
-
+    vrecoil=0,
     # coil params
+    geometry = 'mop',
+    optical_pumping = 'vs',
     RAH = 1.0795,
     RHH = 1.27,
     AAH = 1.18745,
@@ -26,22 +28,23 @@ params = dict(
     NHH = 2,
     nAH = [0, 0, 1],
     nHH = [0, 0, 1],
-    HH_scale = 1,    # I0_HH / I0_AH
 
     # cloud params
-    T        = 200,                        # initial temperature, mK
-    Natom    = 1000,                      # number of atoms to simulate
-    width    = [ 0.25, 0.25, 0.25],        # initial size (st. dev), cm
-    r0_cloud = [0.0, 0.0, 0.0],            # initial center, cm
-    v0       = [0 * 1e2 * 1e-6, 0,0, 0.0], # initial velocity, cm/us
+    T        = 100,                          # initial temperature, mK
+    Natom    = 1000,                         # number of atoms to simulate
+    width    = [ 0.5/2, 0.3/2, 0.3/2],       # initial size (st. dev), cm
+    r0_cloud = [-9.2, 0.0, 0.0],             # initial center, cm
+    v0       = [500 * 1e2 * 1e-6, 0,0, 0.0], # initial velocity, cm/us
 
     # current pulse params
-    I0       = 2000,                        # max current, A
+    IHH       = 1500,                        # max current, A
+    IAH       = 1500,                        # max current, A
     t0       = 0.0,                         # start time, us
     Npulse   = 1,                           # Number of current pulses
     shape    = 'sin',                       # pulse shape, sin or square
     tau      = 100,                         # discharge time, us
-    tcharge  = 10,                          # recharge time,  us
+    tcharge  = 0,                           # recharge time,  us
+    tof      = 1000,
     decay    = 1.5,                         # factor to decreasue I0 each pulse
 
     # time evolution params
@@ -66,9 +69,10 @@ params = dict(
     seed     = None,
     # relative or absolute path to dir where plots are to be saved (must exist)
     plot_dir = 'plots',
+    data_dir = 'data',
     # suffix or version number appended to plot file names
     suffix   = ''
     )
 
 # DO IT!
-tmps.run_sim(params)
+tmps.run_sim(params, load=False, recalc_B=True, resimulate=False, replot=True)
