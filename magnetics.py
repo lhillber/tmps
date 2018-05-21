@@ -86,7 +86,7 @@ def curr_pulse(t, Npulse, tcharge, delay, tau, shape, decay, **kwargs):
     limdb = delay + tau
     for p in range(Npulse):
         shapes = {'sin': np.sin(pi * (t - limda) / (tau)), 'square': 1,
-                  'poly': poly(t-limda)}
+                  'ramp': (t - limda)/(limdb - limda), 'poly': poly(t-limda)}
         if limda < t < limdb: return 1/(decay)**p * shapes[shape]
         limda += tau + tcharge
         limdb += tau + tcharge
@@ -652,6 +652,12 @@ def plot_contour(fignum, field, grad_norm=False,
         for i, zi in enumerate(xyzis[coord]):
             ax = fig.add_subplot(3, 3, c)
             xbase, ybase = np.roll(coords, -coord)[1:]
+            # xbase and ybase are fliped when coord == y
+            # (like minus sign on y component of cross product)
+            if coord == 1:
+                xbase_tmp = xbase
+                xbase = ybase.copy()
+                ybase = xbase_tmp.copy()
             x = xyz[xbase]
             y = xyz[ybase]
             z = xyz[coord]
@@ -662,10 +668,10 @@ def plot_contour(fignum, field, grad_norm=False,
             slicei = I_slice.copy()
             slicei[coord] = zi
             b = norm_V[slicei]
-            bx = VX[slicei]
-            by = VY[slicei]
-            bz = VZ[slicei]
             cp = plt.contourf(x, y, b)
+            #bx = VX[slicei]
+            #by = VY[slicei]
+            #bz = VZ[slicei]
             #sp = ax.streamplot(x, y, bx, by)
             #plt.clim(*clim)
             ax.set_ylabel(coord_labels[ybase] + ' [cm]')
@@ -953,6 +959,7 @@ AH_geometry = dict(
     zmin     = -2,
     zmax     =  2,
     )
+
 def AH_example():
     # make the field
     # recalc_B = True will always recalculate the field
