@@ -14,6 +14,15 @@ params = dict(
     mu = 9.274e-24 * 1e4, # particle magnetic moment, A m^2 cm^2/ m^2
     vrecoil = 0,          # recoil velocity of transition, cm/us
 
+    # cloud params
+    max_init = 10000,                    # max initialization cycles
+    Tt       = 100.0,                    # initial transverse temperature, mK
+    Tl       = 100.0,                    # initial longitudinal temperature, mK
+    Natom    = 100000,                   # number of atoms to simulate
+    width    = [ 0.35, 0.25, 0.25],      # initial size (st. dev), cm
+    r0_cloud = [-37.0, 0.0, 0.0],        # initial center, cm
+    v0       = [480*1e2*1e-6, 0.0, 0.0], # initial velocity, cm/us
+
     # state preparation
     optical_pumping = 'hfs',# state preparation before kick ('1' ,'0', 'vs', 'xs')
 
@@ -33,8 +42,6 @@ params = dict(
     #r0_detect= [60.0, 0.0, 0.0],  # 2. longitudinal location of detection, cm
 
     # current pulse params
-    I1      = 1500.0,  # bias max current, A
-    I2      = 1500.0,  # kick max current, A
     shape    = 'poly', # pulse shape, sin or square
     tau      = 800.0,  # discharge time, us
     Npulse   = 1,      # number of current pulses
@@ -44,17 +51,10 @@ params = dict(
     dt       = 1.0,    # time step (see format_params), us
     delay    = 730.0,  # deleay before first pulse, us
 
-    # cloud params
-    max_init = 10000,                    # max initialization cycles
-    Tt       = 100.0,                    # initial transverse temperature, mK
-    Tl       = 100.0,                    # initial longitudinal temperature, mK
-    Natom    = 100000,                   # number of atoms to simulate
-    width    = [ 0.35, 0.25, 0.25],      # initial size (st. dev), cm
-    r0_cloud = [-37.0, 0.0, 0.0],        # initial center, cm
-    v0       = [480*1e2*1e-6, 0.0, 0.0], # initial velocity, cm/us
-
     # coil params
     config = 'smop3',
+    I1      = 1500.0,  # bias max current, A
+    I2      = 1500.0,  # kick max current, A
     n = [0, 0, 1],
     r0 = [0.0, 0.0, 0.0],
     L1 = 4.75,
@@ -90,4 +90,4 @@ sim = tmps.Simulation(params,
     save_simulations=True,
     verbose=True)
 
-sim.plot_measures('plots/typical_kick.pdf', show=False, save=True)
+sim.plot_measures('plots/testing.pdf', show=False, save=True)

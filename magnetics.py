@@ -113,17 +113,20 @@ def make_acceleration(field, mu, m, Npulse, tcharge, delay, tau, shape, decay, *
 # n centered at point r0.
 
 class Field():
-    def __init__(self, geometry, recalc_B=True, base='data/fields', load_fname=None):
-        self.uid = hashlib.sha1(json.dumps(geometry, sort_keys=True).encode(
-                'utf-8')).hexdigest()
-        self.fname = os.path.join(base, self.uid)
+    def __init__(self, geometry, recalc_B=True, data_dir='data/fields', load_fname=None):
+        self.uid = hashlib.sha1(
+                     json.dumps(
+                       geometry, sort_keys=True).encode(
+                         'utf-8')).hexdigest()
+        self.fname = os.path.join(data_dir, self.uid)
         geometry = format_geometry(geometry)
         self.geometry = geometry
         if not recalc_B:
             try:
+                print('Attempting to load field...')
                 self.load(fname=load_fname)
             except(FileNotFoundError):
-                print('Field data not found')
+                print('Field data not found. Generating now...')
                 recalc_B = True
         if recalc_B:
             self.Bmap = {'w'     : self.Bwire,
@@ -146,25 +149,25 @@ class Field():
 
     # save state of the class instance with name given by unique hash of params
     def save(self):
-        print('saving field data to {}'.format(self.fname))
+        print('Saving field data to {}'.format(self.fname))
         file = open(self.fname,'wb')
         file.write(pickle.dumps(self.__dict__))
         file.close()
 
     # load state...
     def load(self, fname=None):
-        print('loading field data from {}'.format(self.fname))
         if fname is None:
             fname = self.fname
         file = open(fname,'rb')
         dataPickle = file.read()
         file.close()
         self.__dict__ = pickle.loads(dataPickle)
+        print('Field data loaded from {}'.format(self.fname))
 
     def make_grid(self, xmin, xmax, Nxsteps,
                         ymin, ymax, Nysteps,
                         zmin, zmax, Nzsteps, **kwargs):
-        print('making solution grid...')
+        print('Making solution grid...')
         # grid spacing
         dx = (xmax - xmin)/Nxsteps
         dy = (ymax - ymin)/Nysteps
@@ -211,7 +214,7 @@ class Field():
         return VX_interp, VY_interp, VZ_interp
 
     def make_B(self, geometry, **kwargs):
-        print('calculating field and gradient...')
+        print('Calculating field and gradient...')
         # grid spacing, shape, and valuse
         dx, dy, dz = self.dxyz
         Xshape, Yshape, Zshape =self.XYZshape
@@ -593,11 +596,11 @@ def plot_3d(ax, field, grad_norm=False,
     X, Y, Z = field.XYZ
     Xshape, Yshape, Zshape = field.XYZshape
     if grad_norm:
-        print('plotting 3D gradient vectors...')
+        print('Plotting 3D gradient vectors...')
         VX, VY, VZ = [1e12 * interp(r) for interp in field.grad_norm_BXYZ_interp]
         title = r'$\nabla |\bf{B}$|'
     else:
-        print('plotting 3D field vectors...')
+        print('Plotting 3D field vectors...')
         VX, VY, VZ = [1e12 * interp(r) for interp in field.BXYZ_interp]
         title = r'$\bf{B}$'
     VX.shape = Xshape
@@ -623,13 +626,13 @@ def plot_contour(fignum, field, grad_norm=False,
     xyz = field.xyz
     Xshape, Yshape, Zshape = field.XYZshape
     if grad_norm:
-        print('plotting 2D contour slice of gradient...')
+        print('Plotting 2D contour slice of gradient...')
         VX, VY, VZ = [1e12 * interp(r) for interp in field.grad_norm_BXYZ_interp]
-        title = r'$|\nabla |\bf{B}(%s = %.2f)$||'
+        title = r'$\lvert \nabla B(%s = %.2f) \rvert$'
     else:
-        print('plotting 2D contour slice of field...')
+        print('Plotting 2D contour slice of field...')
         VX, VY, VZ = [1e12 * interp(r) for interp in field.BXYZ_interp]
-        title = r'$|\bf{B}(%s = %.2f)|$'
+        title = r'$B(%s = %.2f)$'
     fig = plt.figure(fignum, figsize=(6,9.5))
     VX.shape = Xshape
     VY.shape = Yshape
@@ -693,11 +696,11 @@ def plot_contour(fignum, field, grad_norm=False,
 # TODO: generalize
 def plot_slices(fignum, field, grad_norm=False):
     if grad_norm:
-        print('plotting 1D gradient slices...')
+        print('Plotting 1D gradient slices...')
         xinterp, yinterp, zinterp = field.grad_norm_BXYZ_interp
-        ylabel = r'$\partial |B|/\partial %s$ [T/cm]'
+        ylabel = r'$\partial B \partial %s$ [T/cm]'
     else:
-        print('plotting 1D field slices...')
+        print('Plotting 1D field slices...')
         xinterp, yinterp, zinterp = field.BXYZ_interp
         ylabel = '$B_%s$ [T]'
     fig = plt.figure(fignum, figsize=(6,4))
@@ -790,7 +793,7 @@ def field_analysis(field, fname,
         else:
             save_loc = os.path.join('plots/fields', fname + '.pdf')
             multipage(save_loc)
-            print('plots saved to {}'.format(save_loc))
+            print('\n Plots saved to {}'.format(save_loc))
 
 
 # A few test case geometry dictionaries
