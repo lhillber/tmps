@@ -55,6 +55,7 @@ import traceback
 import pickle
 import hashlib
 import json
+import copy
 
 import numpy as np
 from numpy import pi
@@ -70,40 +71,47 @@ from mpl_toolkits.mplot3d import proj3d
 from matplotlib.patches import Circle
 from matplotlib.ticker import NullFormatter, FormatStrFormatter
 
-ps =[-3.4162938439228601e-39, 2.5583642117992684e-35,
-     -8.6114257981640124e-32, 1.7195168964982026e-28,
-     -2.2632215792992635e-25, 2.0622289076608083e-22,
-     -1.3280636526982561e-19, 6.0473267830240955e-17,
-     -1.9059936559084898e-14, 3.9198420604958593e-12,
-     -4.4115606443755746e-10, 3.5928719421049858e-09,
-      5.9195297664400324e-06, -0.00070221256261507965,
-      0.024339393545649748, 0.68727142284634279] 
-poly = np.poly1d(ps)
-
-# current pulses
-def curr_pulse(t, Npulse, tcharge, delay, tau, shape, decay, **kwargs):
-    limda = delay
-    limdb = delay + tau
-    for p in range(Npulse):
-        shapes = {'sin': np.sin(pi * (t - limda) / (tau)), 'square': 1,
-                  'ramp': (t - limda)/(limdb - limda), 'poly': poly(t-limda)}
-        if limda < t < limdb: return 1/(decay)**p * shapes[shape]
-        limda += tau + tcharge
-        limdb += tau + tcharge
+def curr_pulse(t, t0, tau, shape, scale, **kwargs):
+    ps =[-3.4162938439228601e-39, 2.5583642117992684e-35,
+         -8.6114257981640124e-32, 1.7195168964982026e-28,
+         -2.2632215792992635e-25, 2.0622289076608083e-22,
+         -1.3280636526982561e-19, 6.0473267830240955e-17,
+         -1.9059936559084898e-14, 3.9198420604958593e-12,
+         -4.4115606443755746e-10, 3.5928719421049858e-09,
+          5.9195297664400324e-06, -0.00070221256261507965,
+          0.024339393545649748, 0.68727142284634279] 
+    poly = np.poly1d(ps)
+    shapes = {'sin'   : np.sin(pi * (t - t0) / tau),
+              'square': 1,
+              'ramp'  : (t - t0) / tau,
+              'poly'   : poly(t-t0)}
+    if t0 <= t <= t0 + tau:
+        return scale * shapes[shape]
     else:
         return 0.0
 
-def make_acceleration(field, mu, m, Npulse, tcharge, delay, tau, shape, decay, **kwargs):
-    xinterp, yinterp, zinterp = field.grad_norm_BXYZ_interp
-    def a(xs, t):
-        dBdx_interp = xinterp(xs)
-        dBdy_interp = yinterp(xs)
-        dBdz_interp = zinterp(xs)
-        a_xyz =  -mu / m * curr_pulse(t,
-                Npulse, tcharge, delay, tau, shape, decay) *\
-            np.c_[dBdx_interp, dBdy_interp, dBdz_interp]
-        return a_xyz
-    return a
+def hash_state(self_dict, exclude_keys):
+    name_dict = copy.deepcopy(self_dict)
+    for k, v in self_dict.items():
+        if k in exclude_keys:
+            del name_dict[k]
+
+        if type(v) == np.ndarray:
+            for i, vi in enumerate(v):
+                if isinstance(vi, np.float64):
+                    name_dict[k][i] = np.asscalar(vi)
+            name_dict[k] = list(v)
+
+    for k, v in name_dict.items():
+        uid = hashlib.sha1(
+                 json.dumps(
+                 {k:v},
+                 sort_keys=True).encode('utf-8')).hexdigest()
+    uid = hashlib.sha1(
+             json.dumps(
+             name_dict,
+             sort_keys=True).encode('utf-8')).hexdigest()
+    return uid
 
 
 # MAGNETIC FIELDS
@@ -111,16 +119,14 @@ def make_acceleration(field, mu, m, Npulse, tcharge, delay, tau, shape, decay, *
 
 # Field at point r due to current I running in loop raidus R and normal vector
 # n centered at point r0.
-
 class Field():
     def __init__(self, geometry, recalc_B=True, data_dir='data/fields', load_fname=None):
-        self.uid = hashlib.sha1(
-                     json.dumps(
-                       geometry, sort_keys=True).encode(
-                         'utf-8')).hexdigest()
-        self.fname = os.path.join(data_dir, self.uid)
-        geometry = format_geometry(geometry)
+        geometry['r0'] = np.array(geometry['r0'], dtype=float)
+        geometry['n'] = np.array(geometry['n'], dtype=float)
         self.geometry = geometry
+        self.uid = hash_state(geometry, exclude_keys=['field_name'])
+        self.fname = os.path.join(data_dir, self.uid)
+
         if not recalc_B:
             try:
                 print('Attempting to load field...')
@@ -144,7 +150,6 @@ class Field():
                          'mop3'  : self.Bmop3}
             self.make_grid(**self.geometry)
             self.make_B(self.geometry)
-            #self.make_acceleration(self.geometry)
             self.save()
 
     # save state of the class instance with name given by unique hash of params
@@ -767,7 +772,7 @@ def format_geometry(geometry):
             n = np.array(v)
             n = n / norm(n)
             geometry[k] = n
-        if k[:2] == 'r0' or k == 'width':
+        if k[:2] == 'r0':
             geometry[k] = np.array(v)
     return geometry
 

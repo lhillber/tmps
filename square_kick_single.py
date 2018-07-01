@@ -13,7 +13,7 @@ params = dict(
     m  = 1.16e-26,        # particle mass, kg
     mu = 9.274e-24 * 1e4, # particle magnetic moment, A m^2 cm^2/ m^2
     vrecoil = 0,          # recoil velocity of transition, cm/us
-    optical_pumping = '0',# state preparation before kick ('1' ,'0', 'vs', 'xs')
+    optical_pumping = 'lfs',# state preparation before kick ('1' ,'0', 'vs', 'xs')
 
     # pin hole params
     pin_hole = True,    
@@ -26,33 +26,29 @@ params = dict(
     t0_tag = 0,
     dt_tag = 5,
 
-    # tagging
-    tag = True,
-    r0_tag = [-3, 0, 0],
-    t0_tag = 0,
-    dt_tag = 5,
 
     # current pulse params
-    IHH      = 0,  # max current, A
-    IAH      = 0,  # max current, A
+    IHH      = 1500,  # max current, A
+    IAH      = 1500,  # max current, A
     Npulse   = 1,     # Number of current pulses
     shape    = 'sin', # pulse shape, sin or square
     tau      = 100,   # discharge time, us
     tcharge  = 0,     # recharge time,  us
-    r0_detect= [52.7, 0.0, 0.0],  # longitudinal location of detection, cm
+    r0_detect= [37.17, 0.0, 0.0],  # longitudinal location of detection, cm
     decay    = 1.5,   # factor to decreasue I0 each pulse
     # `None` uses defualt calculated values in `format_params`
     tmax     = None,  # max time (see format_params), us
     dt       = None,  # time step (see format_params), us
-    delay    = None,  # deleay before first pulse, us
+    delay    = 600,  # deleay before first pulse, us
 
     # cloud params
+    max_init = 10000,
     Tt       = 100,                       # initial transverse temperature, mK
     Tl       = 100,                      # initial longitudinal temperature, mK
     Natom    = 10000,                   # number of atoms to simulate
     width    = [ 0.35, 0.5/2, 0.5/2],   # initial size (st. dev), cm
-    r0_cloud = [-29.5, 0.0, 0.0],         # initial center, cm
-    v0       = [480*1e2*1e-6, 0, 0.0], # initial velocity, cm/us
+    r0_cloud = [-30.0, 0.0, 0.0],         # initial center, cm
+    v0       = [480*1e2*1e-6, 0.0, 0.0], # initial velocity, cm/us
 
     # coil params
     config = 'smop',
