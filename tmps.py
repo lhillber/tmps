@@ -138,13 +138,15 @@ from matplotlib.ticker import NullFormatter
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import numpy as np
-from numpy import pi
-from numpy.linalg import norm
+from numpy import pi, sqrt, cos, sin
+from numpy.linalg import norm, inv
 
 import scipy
 from scipy.stats import gaussian_kde, skew
 from mpi4py import MPI
 from fastkde import fastKDE
+
+from sympy.physics.wigner import wigner_6j, wigner_3j, clebsch_gordan
 
 import sys
 import os
@@ -154,8 +156,8 @@ import traceback
 import magnetics as mag
 
 # The following two lines ensure type 1 fonts are used in saved pdfs
-mpl.rcParams['pdf.fonttype'] = 42
-#mpl.rcParams['ps.fonttype']  = 42
+#mpl.rcParams['pdf.fonttype'] = 42
+mpl.rcParams['ps.fonttype']  = 42
 
 # plotting defaults
 plt_params = {
@@ -181,6 +183,40 @@ h  = 6.62607004e-34 * 1e4 * 1e-6
     # Planck's Constant, m^2 kg s^-1 cm^2/m^2 s/us
 rtube = 0.75 * 2.54 / 2
     # radius of slower tube, cm
+muB = 9.274e-24 * 1e4 # Bohr magneton, A m^2 cm^2/ m^2
+cc = 299792458 * 1e2 * 1e-6  # m/s cm/m speed of light
+ee = 1.60217e-19
+eps0 = 8.854187817e-12 *1e24 * 1e-6 # A^2 s^4 kg^-1 m^-3 * vac permittivity
+
+# a and b in MHz
+Li7_LJ_fs = {0.0   :
+              {1.0/2.0 :
+                  {'a' : 401.752, 'b' : None, 'gJ' : 2.0023010}},
+            1.0   :
+              {1.0/2.0 :
+                  {'a' : 45.914,  'b' : None, 'gJ'  : 0.6668},
+              3.0/2.0 :
+                  {'a' : -3.055,  'b' : -0.2221, 'gJ' : 1.335}},
+            'D1'  :
+                  {'wlen'  : 0.0000670976, # cm
+                   'wnum'  : 2.0 * pi /0.0000670976, # rad/cm
+                   'freq'  : cc / 0.0000670976, # MHz
+                   'omega' : 2.0 * pi * cc / 0.0000670976, # rad/us
+                   'lifet' : 0.0272, # lifetime, us
+                   'gamma' : 1 / 0.02701, # rad/us
+                   'dnu'   : 1/(2 * pi * 0.02701) # MHz
+                   },
+            'D2'  :
+                  {'wlen'  : 0.0000670961, # cm
+                   'wnum'  : 2.0 * pi /0.0000670976, # rad/cm
+                   'freq'  : cc / 0.0000670976, # MHz
+                   'omega' : 2.0 * pi * cc / 0.0000670976, # rad/us
+                   'lifet' : 0.0272, # us
+                   'gamma' : 1 / 0.02701, # rad/us
+                   'dnu'   : 1/(2 * pi * 0.02701) # MHz
+                   }
+                  }
+
 
 
 # PLOTTING
@@ -270,6 +306,8 @@ def plot_phase_space2(fignum, sim, cloud,
                 y = ps[:Nkde, n]
                 xm = np.mean(x)
                 ym = np.mean(y)
+                dx = 4*np.std(x)
+                dy = 4*np.std(y)
                 if remove_mean:
                     x = x - xm
                     y = y - ym
@@ -290,14 +328,17 @@ def plot_phase_space2(fignum, sim, cloud,
                 idx = z.argsort()
                 idx = np.random.choice(idx, 10000)
                 x, y, z = x[idx], y[idx], z[idx]
-                if xname[1] == 'v':
-                    ax.set_xlim(xm-20, xm+20)
-                else:
-                    ax.set_xlim(xm-2, xm+2)
-                if yname[1] == 'v':
-                    ax.set_ylim(ym-20, ym+20)
-                else:
-                    ax.set_ylim(ym-2, ym+2)
+                #if xname[1] == 'v':
+                #    ax.set_xlim(xm-dx, xm+dx)
+                #else:
+                #    ax.set_xlim(xm-dr, xm+dx)
+                #if yname[1] == 'v':
+                #    ax.set_ylim(ym-ds, ym+ds)
+                #else:
+                #    ax.set_ylim(ym-dr, ym+dr)
+
+                ax.set_xlim(xm-dx, xm+dx)
+                ax.set_ylim(ym-dy, ym+dy)
                 if i==0:
                     ax.set_ylabel(yname)
                 if i == 3:
@@ -636,7 +677,8 @@ class Cloud():
         print('Initializing cloud...')
         self.xs           = np.zeros((self.Natom, 3))
         self.vs           = np.zeros((self.Natom, 3))
-        self.spins        = np.random.choice([-1,1], size=self.Natom)
+        self.F            = np.random.choice([1, 2], size=self.Natom)
+        self.mF           = np.array([np.random.choice(np.arange(-f, f+1)) for f in self.F])
         self.drop_mask    = np.array([False]*self.Natom)
         self.keep_mask    = np.logical_not(self.drop_mask)
         self.set_state()
@@ -658,6 +700,7 @@ class Cloud():
             if self.get_number() == self.Natom:
                 self.drop_mask = mask
                 self.keep_mask = np.logical_not(self.drop_mask)
+                print(self.r0, self.get_temp())
                 return
         print('\nMaximum initialization iterations reached ({})'.format(
                 self.max_init))
@@ -687,6 +730,8 @@ class Cloud():
         return drop_mask
 
     # time evolution
+
+    # time evolution
     def rk4(self, a, t, dt):
         mz = np.vstack([list(self.spins)]*3).T
         k1 = dt * mz *  a(self.xs, t)
@@ -699,7 +744,38 @@ class Cloud():
         l4 = dt * (self.vs + k3)
         self.xs[::] = self.xs + 1/6 * (l1 + 2*l2 + 2*l3 + l4)
         self.vs[::] = self.vs + 1/6 * (k1 + 2*k2 + 2*k3 + k4)
-        r2 = self.xs[::, 0]**2 + self.xs[::, 1]**2 + self.xs[::, 2]**2
+        #r2 = self.xs[::, 0]**2 + self.xs[::, 1]**2 + self.xs[::, 2]**2
+        #self.drop_mask = r2 > 2.0
+        #self.keep_mask = np.logical_not(self.drop_mask)
+
+    def rk42(self, a, t, dt):
+        k1 = a(self.xs,
+               self.vs,
+               self.F,
+               self.mF,
+               t)
+        l1 = self.vs
+        k2 = a(self.xs + l1/2,
+               self.vs + k1/2,
+               self.F,
+               self.mF,
+               t + dt/2)
+        l2 = self.vs + k1/2
+        k3 = a(self.xs + l2/2,
+               self.vs + k2/2,
+               self.F,
+               self.mF,
+               t + dt/2)
+        l3 = self.vs + k2/2
+        k4 = a(self.xs + l3,
+               self.vs + k3,
+               self.F,
+               self.mF,
+               t + dt)
+        l4 = self.vs + k3
+        self.xs[::] = self.xs + dt/6 * (l1 + 2*l2 + 2*l3 + l4)
+        self.vs[::] = self.vs + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
+        #r2 = self.xs[::, 0]**2 + self.xs[::, 1]**2 + self.xs[::, 2]**2
         #self.drop_mask = r2 > 2.0
         #self.keep_mask = np.logical_not(self.drop_mask)
 
@@ -710,17 +786,19 @@ class Cloud():
     # internal state preparation
     def optical_pump(self, mode):
         if mode in ('vs', 'vel', 'v', 'mop'):
-            self.spins[::] = np.sign(self.vs[::, 2])
+            self.spins = np.sign(self.vs[::, 2])
         elif mode in ('xs', 'pos', 'x'):
-            self.spins[::] = np.sign(self.xs[::, 2])
+            self.spins = np.sign(self.xs[::, 2])
         elif mode in (1, '1', 'up', 'HFS', 'hfs', 'minus'):
             self.spins = -np.ones_like(self.xs[::,0])
         elif mode in (0, '0', 'down', 'LFS', 'lfs', 'plus'):
             self.spins = np.random.choice([-1, 1], self.Natom, p=[0.0, 1.0])
-        elif mode in ('none', 'None', None, 'thermal', 'therm'):
+        elif mode in ('thermal', 'therm'):
             self.spins = np.random.choice([-1, 1], self.Natom, p=[0.5, 0.5])
+        elif mode in (None, 'none', 'None'):
+            pass
         else:
-            raise ValueError('optical pumping mode {} not understood'.format(mode))
+            raise ValueError('optical puping mode {} not understood'.format(mode))
         self.recoil()
 
     # TODO enable and check recoils
@@ -779,7 +857,7 @@ class Cloud():
     def get_temp(self):
         c = self.m/kB
         vvars = np.array(self.get_vvars())
-        return  c * vvars 
+        return  c * vvars
 
     def get_thermal_kinetic(self):
         c = self.m * self.get_number() / 2
@@ -810,36 +888,296 @@ class Cloud():
         return rho
 
 
+
+def dict_el_array2list(d):
+    for k, v in d.items():
+        if type(v) == np.ndarray:
+            d[k] = list(v)
+        if type(v) == dict:
+            dict_el_array2list(v)
+        if type(v) == list:
+            for vel in v:
+                if type(vel) == dict:
+                    dict_el_array2list(vel)
+
 def hash_state(self_dict, include_keys):
     name_dict = copy.deepcopy(self_dict)
     for k, v in self_dict.items():
         if k not in include_keys:
             del name_dict[k]
-        if type(v) == np.ndarray:
-            name_dict[k] = list(v)
+    dict_el_array2list(name_dict)
     uid = hashlib.sha1(
              json.dumps(
              name_dict,
              sort_keys=True).encode('utf-8')).hexdigest()
     return uid
 
+def landeg(F, J, L, I=3/2, S=1/2, g='gF'):
+    gJ = 1.0 + (J*(J+1) + S*(S+1) - L*(L + 2)) / (2*J*(J+1))
+    if g == 'gJ':
+        return gJ
+    elif g == 'gF':
+        gF =  gJ * (F*(F+1) + J*(J+1) - I*(I+1)) / (2*F*(F+1))
+        return gF
+
+#dEs = []
+#Bs = np.arange(0, 0.01*1e-12, 0.0001*1e-12)
+#for B in Bs:
+#    dE = sorted(np.linalg.eigvals(hyper_fine_zeeman(B)))
+#    dEs += [dE]
+#plt.plot(Bs*1e12, 2*pi*np.array(dEs)/h)
+#plt.show()
+
+class Laser():
+    def __init__(self, laser_params):
+        self.params = laser_params
+        self.make_ed(self.params['J'],
+                              self.params['Jp'],
+                              self.params['I'])
+        self.params['k'] = 2 * pi * self.params['k'] / self.params['wlen']
+
+    def pol2local(self, k, B, pol):
+        k = k/norm(k)
+        normB = norm(B, axis=1)
+        normB[normB==0.0] = 1
+        B = B/normB[..., np.newaxis]
+        cth = B.dot(k)
+        sth = sqrt(1 - cth**2)
+        A = 1.0 / 2.0 * np.array(
+                            [[1 + cth , - sqrt(2) * sth , 1 - cth ],
+                             [sqrt(2) * sth , 2 * cth , -sqrt(2) * sth ],
+                             [1 - cth , sqrt(2) * sth , 1 + cth ]])
+        A = np.transpose(A, axes=[2,0,1])
+        polprime = A.dot(pol)
+        return polprime
+
+    def intensity(self, r):
+        # get constants
+        r0 = self.params['r0']
+        ang = self.params['ang'] * pi/180
+        wx0 = self.params['wx']
+        wy0 = self.params['wy']
+        wlen = self.params['wlen']
+        k = self.params['k']
+        P = self.params['P']
+        zRx = pi * wx0**2 / wlen
+        zRy = pi * wy0**2 / wlen
+        # transform to k -> z, z0 = 0
+        l, m, k = mag.coil_vecs2(k/norm(k))
+        trans = np.vstack((l, m, k))
+        inv_trans = inv(trans)
+        r = r - r0
+        r = np.dot(r, inv_trans)
+        x = r[:,0]
+        y = r[:,1]
+        z = r[:,2]
+        # evaluate intensity
+        wx = wx0 * sqrt(1 + z*z / zRx/zRx)
+        wy = wy0 * sqrt(1 + z*z / zRy/zRy)
+        a = cos(ang)**2 / wx**2 + sin(ang)**2 / wy**2
+        b = (sin(2*ang) / 2.0) * (1.0 / wx**2 - 1.0 / wy**2)
+        c = sin(ang)**2 / wx**2 + cos(ang)**2 / wy**2
+        # profile of electric field (no phase)
+        # TODO add exact phase
+        Eprof = np.exp( -(a*x*x + 2*b*x*y + c*y*y))
+        I0 = 2 * P * sqrt(a*c - b*b) / pi # normalization for power
+        I =  I0 * Eprof*Eprof
+        return I
+
+    # Metcalf Var der Straten 10.23
+    def make_rabi(self, J, Jp, I, L=0.0, Lp=1.0, S=1.0/2.0):
+        # attempt Load
+        if Jp == Lp-S:
+            line = 'D1'
+        elif Jp == Lp+S:
+            line = 'D2'
+        wlen = self.params['wlen']
+        gamma = self.params['gamma']
+        reduced_el = sqrt(3*eps0*wlen**3*gamma/(4*pi**2*cc*h))
+        fname = 'data/rabi_freq/'+line+'.npy'
+        if os.path.exists(fname):
+            self.Omega = np.load(fname).item()
+        else:
+            self.Omega = {}
+            Js = [J for J in np.arange(np.abs(L-S), L+S+1)]
+            Jps = [J for J in np.arange(np.abs(Lp-S), Lp+S+1)]
+            for J in Js:
+                Fs = [F for F in np.arange(np.abs(J-I), J+I+1)]
+                for Jp in Jps:
+                    Fps = [Fp for Fp in np.arange(np.abs(Jp-I), Jp+I+1)]
+                    for F in Fs:
+                        ms = [m for m in np.arange(-F, F+1)]
+                        for Fp in Fps:
+                            mps = [mp for mp in np.arange(-Fp, Fp+1)]
+                            for m in ms:
+                                for mp in mps:
+                                    for q in [1.0, 0.0, -1.0]:
+                                        key = (F, Fp, J, Jp, m, mp, q)
+                                        # sans sqrt(I)
+                                        self.Omega[key] =\
+                                            reduced_el *\
+                                            (-1.0)**(q*(q+1)/+1+2*F-m+I+Jp+S+Lp+J) *\
+                                            sqrt((2*Jp + 1) * (2*J + 1)) *\
+                                            sqrt((2*Fp + 1) * (2*F + 1)) *\
+                                            wigner_6j(Lp, 1, L,
+                                                       J,  S, Jp).n() *\
+                                            wigner_6j(Jp, 1, J,
+                                                       F,  I, Fp).n() *\
+                                            wigner_3j(Fp, 1, F,
+                                                      -mp, q, m).n()
+            np.save(fname, self.Omega)
+
+    def make_ed(self, J, Jp, I, L=0.0, Lp=1.0, S=1.0/2.0):
+        # electric dipole
+        if Jp == Lp-S:
+            line = 'D1'
+        elif Jp == Lp+S:
+            line = 'D2'
+        wlen = self.params['wlen']
+        gamma = self.params['gamma']
+        reduced_el = sqrt(3*eps0*h*wlen**3*gamma/(16*pi**3))
+        fname = 'data/rabi_freq/'+line+'.npy'
+        if os.path.exists(fname):
+            self.ed = np.load(fname).item()
+        else:
+            self.ed = {}
+            Js = [J for J in np.arange(np.abs(L-S), L+S+1)]
+            Jps = [J for J in np.arange(np.abs(Lp-S), Lp+S+1)]
+            for J in Js:
+                Fs = [F for F in np.arange(np.abs(J-I), J+I+1)]
+                for Jp in Jps:
+                    Fps = [Fp for Fp in np.arange(np.abs(Jp-I), Jp+I+1)]
+                    for F in Fs:
+                        ms = [m for m in np.arange(-F, F+1)]
+                        for Fp in Fps:
+                            mps = [mp for mp in np.arange(-Fp, Fp+1)]
+                            for m in ms:
+                                for mp in mps:
+                                    for q in [1.0, 0.0, -1.0]:
+                                        key = (F, Fp, J, Jp, m, mp, q)
+                                        # electric dipole
+                                        self.ed[key] =\
+                                            reduced_el *\
+                                            sqrt((2*J+1) * (2*Jp+1) * (2*F+1) * (2*Fp+1)) *\
+                                            wigner_6j(Lp, Jp, S,
+                                                      J, L, 1) *\
+                                            wigner_6j(Jp, Fp, I,
+                                                      F, J, 1) *\
+                                            wigner_3j(F, 1, Fp,
+                                                      m, q, -mp)
+                                            #clebsch_gordan(Fp, 1, F, mp, q, m)
+            np.save(fname, self.ed)
+
+    def hyper_fine_zeeman(self, B, L, J, I=3.0/2.0, gI=-0.001182213):
+        a = Li7_LJ_fs[L][J]['a']
+        b = Li7_LJ_fs[L][J]['b']
+        gJ = Li7_LJ_fs[L][J]['gJ']
+        F = np.arange(np.abs(I - J), I+J+1)
+        IdotJ = np.array([(f*(f+1) - J*(J+1) - I*(I+1))/2 for f in cstates[::,0]])
+        CG = np.array([[clebsch_gordan(J, I, f, mj, mi, mf).n()
+            for f, mf in cstates]
+            for mj, mi in ustates
+            ])
+        IdotJij = 1.0/2.0 * np.array(
+                [[IdotJ.dot(CG[i] * CG[j])
+                    for i in range(n)] for j in range(n)])
+        H = np.zeros((n,n))
+        for M, (mj, mi) in enumerate(ustates):
+            for N, (mjp, mip) in enumerate(ustates):
+                Hmn = h * a * IdotJij[M, N] / (2*pi)
+                if not b is None:
+                    Hmn += h * b *\
+                         3*IdotJij[M, N]*(IdotJij[M, N] + 1) /\
+                         (2*I*(2*I - 1)*2*J*(2*J - 1))
+                if M == N:
+                    Hmn += + (gJ * mj + gI * mi) * muB * B
+                H[M,N] = Hmn
+        return H
+
+    def make_E(self, L, J, Bmin=0, Bmax=1e-12, NB=100):
+        for B in np.linspace(Bmin, Bmax, NB):
+            H = hyper_fine_zeeman(B, L, J)
+            E = sorted(np.eigval(H))
+            #for f, mf in
+
+    def zeeman_shift(self, B, L, J, F, m):
+        g = landeg(F, J, L)
+        return -2*pi * g * m * B * muB / h
+        #H = hyper_fine_zeeman(B, L, J)
+        #self.E[(F, mf)](B) / h
+
+    def doppler_shift(self, v):
+        k = self.params['k']
+        return -v.dot(k) # MHz
+
+
+
+    def Pscatter_per_time(self, B, r, v, F, m, dt):
+        normB = norm(B, axis=1)
+        normB[normB==0.0] = 1
+        B = B/normB[..., np.newaxis]
+        I = self.params['I']
+        L = self.params['L']
+        Lp = self.params['Lp']
+        J = self.params['J']
+        Jp = self.params['Jp']
+        Fp = self.params['Fp']
+        gamma = self.params['gamma']
+        delta0 = self.params['delta0']
+        pol = self.params['pol']
+        pollocal = self.pol2local(self.params['k'], B, pol)
+        ws = np.conjugate(pollocal) * pollocal
+        doppler = self.doppler_shift(v)[..., np.newaxis]
+        I = self.intensity(r)
+        s = 2*(8*pi*pi*I/ (gamma**2*eps0*h**2*cc))[...,np.newaxis] *\
+                np.array([
+                [wi * self.ed[(FF, Fp, J, Jp, mm, mm+1-qi, 1-qi)]**2
+                    for qi, wi in enumerate(w)]
+                for w, FF, mm in zip(ws[::,::-1], F, m)])
+        zeeman = np.array([
+                 [self.zeeman_shift(Bn, Lp, Jp, Fp, mm+q) -\
+                  self.zeeman_shift(Bn, L, J, FF, mm)
+                 for q in [1, 0, -1]]
+                 for Bn, FF, mm in zip(normB, F, m)])
+        sgn = np.sign(r[::,2])[..., np.newaxis]
+        P = gamma / 2  * s/\
+            (1 + s + 4*(delta0 + doppler + sgn*zeeman)**2/gamma**2)
+        #print(np.mean(zeeman), np.mean(delta0), np.mean(doppler))
+        # assert sum across rows is < 1
+        return P
+
+def rand_uvecs(N, dim=3):
+    vecs = np.random.normal(size=(N, dim))
+    mags = norm(vecs, axis=-1)
+    return vecs / mags[..., np.newaxis]
+
 # simulation class evolves a cloud instance
 class Simulation():
     def __init__(self,
                  cloud_params,
                  sim_params,
+                 laser_params,
                  reinit=True,
                  resimulate=True,
                  verbose=True,
                  load_fname=None,
                  save_simulation=True,
                  observation_idx=None,
+                 fly=True,
                  data_dir='data'):
 
         self.cloud_params = cloud_params
         self.sim_params = sim_params
-        self.uid = hash_state(self.__dict__,
-            include_keys = ['sim_params', 'cloud_params'])
+
+        if laser_params is None:
+            self.uid = hash_state(self.__dict__,
+                include_keys = ['sim_params', 'cloud_params'])
+        else:
+            self.laser_params = laser_params
+            self.uid = hash_state(self.__dict__,
+                include_keys = ['sim_params', 'cloud_params', 'laser_params'])
+            self.lasers = np.array([Laser(params) for params in laser_params])
+
         self.fname = os.path.join(data_dir, self.uid)
         if not resimulate:
             try:
@@ -851,8 +1189,8 @@ class Simulation():
 
         if resimulate:
             self.process_sim_params(**self.sim_params)
-            self.process_timing()
             self.cloud = Cloud(**cloud_params, reinit=reinit)
+            self.process_timing()
             self.init_cloud = copy.deepcopy(self.cloud)
             Ntsteps = len(self.ts)
             self.Ntsteps = Ntsteps
@@ -862,7 +1200,7 @@ class Simulation():
             elif observation_idx in (None, 'None', 'none'):
                 self.observation_idx = [0 , 1, Ntsteps - 2, Ntsteps -1]
             else:
-                self.observation_idx = observation_idx 
+                self.observation_idx = observation_idx
             self.measures_map = {
                                  'traj'     : self.cloud.get_xs,
                                  'vels'     : self.cloud.get_vs,
@@ -876,7 +1214,7 @@ class Simulation():
                                  'thermKs'  : self.cloud.get_thermal_kinetic,
                                  'kinetics' : self.cloud.get_kinetic}
             self.init_sim()
-            self.run_sim(verbose=verbose)
+            self.run_sim(verbose=verbose, fly=fly)
             if save_simulation:
                 self.save()
 
@@ -910,6 +1248,7 @@ class Simulation():
 
     def process_sim_params(self, dt, delay, r0_detect, pulses):
         self.dt        = dt
+        self.delay = None
         self.delay     = delay
         self.r0_detect = r0_detect
         self.pulses    = pulses
@@ -931,6 +1270,9 @@ class Simulation():
                 field_num += 1
 
     def process_timing(self):
+        if self.delay == None:
+            self.delay = np.abs(self.cloud.r0[0]/self.cloud.v0[0]) -\
+                            self.pulses[0]['tau']/2.0
         dt = self.dt
         ta = 0.0
         tb = self.delay
@@ -1013,6 +1355,68 @@ class Simulation():
             return a_xyz
         return a
 
+    def make_acceleration2(self, pulse):
+        field = pulse['field']
+        lasers = self.lasers
+        mu = self.cloud.mu
+        m = self.cloud.m
+        dt = self.dt
+        gamma = self.lasers[0].params['gamma']
+        dxinterp, dyinterp, dzinterp = field.grad_norm_BXYZ_interp
+        xinterp, yinterp, zinterp = field.BXYZ_interp
+        def a(xs, vs, F, mF, t):
+            Bx = xinterp(xs)
+            By = yinterp(xs)
+            Bz = zinterp(xs)
+            B = np.c_[Bx, By, Bz] * mag.curr_pulse(t, **pulse)
+            dBdx = dxinterp(xs)
+            dBdy = dyinterp(xs)
+            dBdz = dzinterp(xs)
+            dBdr = np.c_[dBdx, dBdy, dBdz] * mag.curr_pulse(t, **pulse)
+            Ntrials=100
+            force = np.zeros(xs.shape)
+            pss = np.hstack([laser.Pscatter_per_time(B, xs, vs, F, mF, dt) for laser in lasers])
+            denom = np.max(pss, axis=1)
+            mask = denom>0
+            pss[mask] = pss[mask]/denom[mask][...,np.newaxis]
+            totalp = 1 - np.product(1 - pss, axis=1)
+            for i in range(Ntrials):
+                scatter = vectorized_choice(np.vstack([totalp, 1-totalp]), np.array([True, False]))
+                outcomes = np.arange(0, 3*len(lasers))
+                Nscatt = np.sum(scatter)
+                finalized = np.array([False]*Nscatt)
+                N = np.sum(finalized)
+                selections = np.zeros(finalized.shape, dtype=int)
+                while N < Nscatt:
+                    print(N)
+                    not_finalized = np.logical_not(finalized)
+                    selected = np.random.choice(outcomes, Nscatt-N)
+                    p = pss[np.where(not_finalized)[0], selected]
+                    finalize = vectorized_choice(np.vstack([p, 1-p]), np.array([True, False]))
+                    selections[np.where(not_finalized)[0][finalize]] = selected[finalize]
+                    finalized[not_finalized] = finalize
+                    N = np.sum(finalized)
+                which_laser = np.array(selections/3, dtype=int)
+                ks = np.array([laser.params['k'] for laser in lasers[which_laser]])
+                Fps = np.array([laser.params['Fp'] for laser in lasers[which_laser]])
+                which_pol  = 1-np.array(selections%3, dtype=int)
+                mp = mF[scatter] + which_pol
+                kmags = norm(ks, axis=1)[...,np.newaxis]
+                f = (ks/kmags + rand_uvecs(len(ks)))/5
+                force[scatter] += f/Ntrials
+            newF_options = [[FF for FF in [Fp-1, Fp+1] if FF in [1, 2]] for Fp in Fps]
+            newF = [np.random.choice(Foption) for Foption in newF_options]
+            newm_options = [[mmp+q for q in [1,0,-1] if
+                mmp+q in np.arange(-FF, FF+1)] for FF, mmp in zip(newF, mp)]
+            newm = [np.random.choice(moption) for moption in newm_options]
+            self.cloud.mF[scatter] = newm
+            #self.cloud.F[scatter] = newF
+            Fs[scatter] = newF
+            g = landeg(F, J=1.0/2.0, L=0.0) #ground state
+            a_xyz =  force/m - np.array([0,0,9.81*1e2*1e-12])
+            return a_xyz
+        return a
+
     def run_sim(self, verbose=True, fly=True):
             # step forward through pulse sequence
             ti = 2  # time step index
@@ -1058,7 +1462,7 @@ class Simulation():
                 tof = 0.0
                 t_remain = tof
 
-            if t_remain > 0.0:
+            if t_remain >= 0.0:
                 self.cloud.free_expand(t_remain)
                 self.ts[-1] = self.ts[-2] + t_remain
                 if verbose:
@@ -1090,7 +1494,9 @@ class Simulation():
                 label = 'pulse {} {}'.format(n, Iname)
                 Is = I0 * np.array(pulse['Is'])
                 ax.plot(ts, Is, label=label)
-        plt.legend()
+        ax.set_xlabel('t [$\mu$]s')
+        ax.set_ylabel('I [A]')
+        #plt.legend()
         if show:
             plt.show()
 
@@ -1120,6 +1526,26 @@ class Simulation():
         if show:
             plt.show()
 
+    def plot_sigmas(self, fig=None, ax=None, fignum=1, show=False,
+            logy=False):
+        if fig is None:
+            fig = plt.figure(fignum, figsize=(3, 3))
+        if ax is None:
+            ax = fig.add_subplot(1,1,1)
+        ts = np.take(self.ts, self.observation_idx)
+        sigmas = self.measures['sigmas']
+        sigma_names = ['sx', 'sy', 'sz',]
+        colors     = ['C3', 'C7', 'k']
+        lines      = ['--', '-.', '-']
+        for label, sigma, color, line in zip(sigma_names, sigmas.T, colors, lines):
+            use_label = '$\sigma_{}$'.format(label[1])
+            ax.plot(ts, sigma, label=use_label, c=color, ls=line)
+        ax.set_xlabel('$t$' + units_map('t'))
+        ax.set_ylabel('$\sigma$' + units_map('sigmas'))
+        ax.legend(loc='upper right')
+        if show:
+            plt.show()
+
     def plot_psd(self, fig=None, ax=None, fignum=1, show=False):
         if fig is None:
             fig = plt.figure(fignum, figsize=(3, 3))
@@ -1138,7 +1564,7 @@ class Simulation():
             fig = plt.figure(fignum, figsize=(3, 3))
         ts = np.take(self.ts, self.observation_idx)
         mean2vx, mean2vy, mean2vz = self.measures['meanKs'].T
-        varvx, varvy, varvz       = self.measures['thermKs'].T
+        varvx, varvy, varvz, varv       = self.measures['thermKs'].T
         Kx, Ky, Kz, K             = self.measures['kinetics'].T
         vels                      = self.measures['vels']
         ax_mean2trans = fig.add_subplot(2,2,1)
@@ -1159,26 +1585,30 @@ class Simulation():
         if show:
             plt.show()
 
-
     def plot_measures(self, save_loc, fignum=1, save=True, show=False):
         if save or show:
             cloud = self.cloud
-            for pulse in self.pulses:
-                field = pulse['field']
-                fignum = mag.plot_slices(fignum, field)
-                fignum = mag.plot_slices(fignum, field, grad_norm=True)
-                fignum = mag.plot_contour(fignum, field)
-                fignum = mag.plot_contour(fignum, field, grad_norm=True)
-            #fignum = plot_traj(fignum, self, cloud, field)
-            #fignum = plot_integrated_density(fignum, self, cloud)
+            for i, pulse in enumerate(self.pulses):
+                if i == 0:
+                    field = pulse['field']
+                    fignum = mag.plot_slices(fignum, field)
+                    fignum = mag.plot_slices(fignum, field, grad_norm=True)
+                    fignum = mag.plot_contour(fignum, field, vclip=0.02)
+                    fignum = mag.plot_contour(fignum, field,
+                             vclip=0.2, grad_norm=True)
+            fignum = plot_traj(fignum, self, cloud, field)
+            fignum = plot_integrated_density(fignum, self, cloud)
             #fignum = plot_integrated_density2(fignum, self, cloud)
             #fignum = plot_phase_space(fignum, self, cloud)
-            #fignum = plot_phase_space2(fignum, self, cloud)
-            #fignum = plot_temps(fignum, self, cloud,
-            #        logy=True, include_names=['Tx','Ty','Tz'])
-            #fignum = plot_psd(fignum, self, cloud)
-            #plot_kinetic_dist(fignum, self, cloud)
+            fignum = plot_phase_space2(fignum, self, cloud)
+            self.plot_sigmas(fignum=fignum+1)
+            self.plot_temps(fignum=fignum+2,
+                    logy=False, include_names=['Tx','Ty','Tz', 'T'])
+            self.plot_psd(fignum=fignum+3)
+            self.plot_current(fignum=fignum+4)
+            #self.plot_kinetic_dist(fignum=fignum+5)
             #fignum = plot_scalar_summary(fignum, self)
+            #fignum = self.plot_scalar_summary(fignum)
             # show or save plots
         if show:
             plt.show()
@@ -1306,6 +1736,7 @@ def chunks(l, n):
 
 def experiment(cloud_params_tmp,
                sim_params_tmp,
+               laser_params,
                reinit=True,
                resimulate=True,
                save_simulations=True,
@@ -1354,6 +1785,7 @@ def experiment(cloud_params_tmp,
             print('\n RANK {} SIMULATION {} OF {}:\r'.format(
                     rank, sim_num + 1, num_sims))
         sim = Simulation(**args,
+                laser_params = laser_params,
                 save_simulation=save_simulations,
                 verbose=verbose, reinit=reinit, resimulate=resimulate,
                 observation_idx=observation_idx)
@@ -1408,7 +1840,7 @@ def scan_3d(sweep_shape, sweep_vals_list, records, plot_fname, unit='cm'):
     multipage(plot_fname, figs=figs)
 
 def scan_2d(sweep_shape, sweep_vals_list, records, plot_fname,
-            to_load = {}, 
+            to_load = {},
             labels = ['centers', 'sigmas', 'skews', 'temps',
                        'meanKs', 'thermKs', 'kinetics'],
             subtract_nokick = False):
@@ -1435,6 +1867,7 @@ def scan_2d(sweep_shape, sweep_vals_list, records, plot_fname,
     loaded_sims = {}
     for sim_name, load_fname in to_load.items():
         loaded_sims[sim_name] = Simulation({},{},
+                laser_params=None,
                 load_fname=load_fname,
                 reinit=False, resimulate=False)
 
@@ -1482,7 +1915,10 @@ def scan_2d(sweep_shape, sweep_vals_list, records, plot_fname,
                                     vals = line_data - sim.measures[label][-1][coordi]
                             else:
                                 if sim_name == 'no kick':
-                                    vals = line_data - sim.measures[label][-1][coordi]
+                                    if label == 'sigmas':
+                                        vals = np.sqrt(line_data**2 - sim.measures[label][-1][coordi]**2)
+                                    else:
+                                        vals = line_data - sim.measures[label][-1][coordi]
 
                     line_label = yparam + ' = ' + str(line_label) + units_map(yparam)
                     ax.plot(xs, vals, label=line_label, color=next(colors))
@@ -1559,5 +1995,194 @@ def scan_1d(sweep_shape, sweep_vals_list, records, plot_fname,
     multipage(plot_fname, figs=figs)
 
 
+def plot_laser_beam():
+    laser = Laser(
+        dict(
+             L = 0.0,
+             Lp = 1.0,
+             I = 3.0 / 2.0,
+             Jp = 3.0 / 2.0, # D2
+             F = 2,
+             Fp = 3,
+             lifet = 0.0272, # lifetime, us
+             gamma = 1 / 0.0272, # ~2 pi * MHz, MHz
+             wlen = 670.962 * 1e-9 * 1e2, # wavelength, cm
+
+             wx = 1, # beam waist x, cm
+             wy = 1, # beam waist y, cm
+             k = np.array([0, 0.0001, 1]), # beam direction, khat
+             r0 = np.array([3, 0, 0]), # beam location,
+             ang = 0,
+             P = 8,
+             pol = np.array([1,0,0])
+             )
+        )
+    x = np.linspace(1,5,100)
+    y = np.linspace(-1.5, 1.5, 100)
+    z = np.linspace(-10000, 10000, 100)
+    X, Y, Z = np.meshgrid(x, y, z)
+    r = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
+    i = laser.intensity(r)
+    i = i.reshape(Y.shape)
+    Imax = np.max(i)
+    i[i<0.1] = None
+    fig = plt.figure(figsize=plt.figaspect(2)*1)
+    ax = fig.add_subplot(111, projection='3d')
+    for j in range(len(z)):
+        c = ax.contourf(X[::,::,j], Y[::,::,j], i[::,::,j], 10,
+            zdir='z', offset=z[j], vmin=0.1, vmax=Imax, alpha=0.3)
+    ax.set_zlim(z[0], z[-1])
+    ax.set_ylim(y[0], y[-1])
+    ax.set_xlim(x[0], x[-1])
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_zlabel('z')
+
+def vectorized_choice(probs, items):
+    s = probs.cumsum(axis=0)
+    r = np.random.rand(probs.shape[1])
+    k = (s < r).sum(axis=0)
+    return items[k]
+
 if __name__ == '__main__':
-    pass
+
+    laser_params = dict(
+         L = 0.0,
+         J = 1.0 / 2.0,
+         Lp = 1.0,
+         Jp = 3.0 / 2.0, # D2
+         F = 2.0,
+         Fp = 3.0,
+         I = 3.0 / 2.0,
+         lifet = 0.0272, # lifetime, us
+         gamma = 1 / 0.0272, # ~2 pi * MHz, MHz
+         wlen = 670.962 * 1e-9 * 1e2, # D2 wavelength, cm
+         wx = 1.0, # beam waist x, cm
+         wy = 1.0, # beam waist y, cm
+         k = np.array([0.0, 0.0, 1.0]), # beam direction, khat
+         r0 = np.array([0.0, 0.0, 0.0]), # beam location,
+         ang = 0.0,
+         P = 10 * 1e-3 * 1e4 * 1e-18,
+         pol = np.array([1,0,0]), #sigma+, pi, sigma- lab frame
+         delta0 = -2*pi*5.8 * 3)
+
+    params1 = laser_params.copy()
+    params1['pol'] = np.array([0.0, 0.0, 1.0])
+    params1['k'] = np.array([0.0, 0.0, -1.0])
+    laser1 = Laser(params1)
+
+    params2 = laser_params.copy()
+    params2['pol'] = np.array([1.0, 0.0, 0.0])
+    params2['k'] = np.array([0.0, 0.0, 1.0])
+    laser2 = Laser(params2)
+
+    geometry = dict(
+        config = 'AH',
+        I = 1.0,
+        n = [0, 0, 1],
+        r0 = [0.0, 0.0, 0.0],
+        R = 8.255,
+        A = 4.674,
+        d = 0.254,
+        M = 6,
+        N = 10,
+        xmin = -3,
+        xmax = 3,
+        Nxsteps = 10,
+        zmin = -3,
+        zmax = 3,
+        Nzsteps = 100,
+        ymin = -3,
+        ymax = 3,
+        Nysteps = 10,
+        )
+
+    field = mag.Field(geometry, recalc_B=False)
+    xinterp, yinterp, zinterp = field.BXYZ_interp
+
+    II = 10
+
+    cloud = Cloud(Natom=1000, Tt=0.3, Tl=0.3, width=[0.2,0.2,0.2], save_cloud=False)
+    xs = cloud.xs
+    #xs[::,2] = 0.1
+    #start = len(xs)//2
+    #xs[:start,2] = np.linspace(-1,0, start)
+    #xs[start:,2] = np.linspace(0, 1, len(xs)-start)
+    xs[:,2] = np.linspace(-2.5,2.5,len(xs))
+    vs = cloud.vs*0
+    vb = np.max(vs)
+    vs[:,2]=vb
+    #vs[::, 2] = np.linspace(-10*vb, 10*vb, len(xs))
+    #vs[:start, 2] = np.linspace(-vb, vb, start)
+    #vs[start:, 2] = np.linspace(-vb, vb, len(xs)-start)
+
+    Bx = xinterp(xs)
+    By = yinterp(xs)
+    Bz = zinterp(xs)
+    #plt.scatter(xs[::,2], Bz*1e12)
+    #plt.ylim([-2e-3,2e-3])
+    #plt.show()
+    B = np.c_[Bx, By, Bz] * II
+
+    #m = 2.0
+    #ms = np.array([-2.0]*len(xs))
+    ms = np.random.choice([2.0, -2.0],len(xs))
+    Fs = np.array([2.0]*len(xs))
+    lasers = np.array([laser1, laser2])
+    Ntrials=50
+    force = np.zeros(xs.shape)
+    pss = np.hstack([laser.Pscatter_per_time(B, xs, vs, Fs, ms, dt=1.0) for laser in lasers])
+    pss = pss/np.max(pss, axis=1)[...,np.newaxis]
+    totalp = 1 - np.product(1 - pss, axis=1)
+    for i in range(Ntrials):
+        scatter = vectorized_choice(np.vstack([totalp, 1-totalp]), np.array([True, False]))
+        outcomes = np.arange(0, 3*len(lasers))
+        Nscatt = np.sum(scatter)
+        finalized = np.array([False]*Nscatt)
+        N = np.sum(finalized)
+        selections = np.zeros(finalized.shape, dtype=int)
+        while N < Nscatt:
+            not_finalized = np.logical_not(finalized)
+            selected = np.random.choice(outcomes, Nscatt-N)
+            p = pss[np.where(not_finalized)[0], selected]
+            finalize = vectorized_choice(np.vstack([p, 1-p]), np.array([True, False]))
+            selections[np.where(not_finalized)[0][finalize]] = selected[finalize]
+            finalized[not_finalized] = finalize
+            N = np.sum(finalized)
+        which_laser = np.array(selections/3, dtype=int)
+        ks = np.array([laser.params['k'] for laser in lasers[which_laser]])
+        Fps = np.array([laser.params['Fp'] for laser in lasers[which_laser]])
+        kmags = norm(ks, axis=1)[...,np.newaxis]
+        f = (ks/kmags + rand_uvecs(len(ks)))/5
+        force[scatter] += f/Ntrials
+        which_pol  = 1-np.array(selections%3, dtype=int)
+        mp = ms[scatter] + which_pol
+        newF_options = [[FF for FF in [Fp-1, Fp+1] if FF in [1, 2]] for Fp in Fps]
+        newF = [np.random.choice(Foption) for Foption in newF_options]
+        newm_options = [[mmp+q for q in [1,0,-1] if
+            mmp+q in np.arange(-FF, FF+1)] for FF, mmp in zip(newF, mp)]
+        newm = [np.random.choice(moption) for moption in newm_options]
+        Fs[scatter] = newF
+        ms[scatter] = newm
+    # key = (F, Fp, J, Jp, m, mp, q)
+    #vvs, ps = np.array(list(zip(*sorted(zip(vvs, totalp)))))
+
+    plt.scatter(vs[::, 2], force[::,2], label='Fz vs vel')
+    plt.xlim(-3*vb, 3*vb)
+    plt.legend()
+    plt.show()
+    plt.clf
+
+    plt.scatter(xs[::, 2], force[::,2], label='Fz vs pos')
+    #plt.xlim(-vb, vb)
+    plt.legend()
+    plt.show()
+    plt.clf
+
+    plt.scatter(xs[::,2], ms)
+    plt.show()
+    #pperlaser = 1- np.product(1 - pss.reshape(-1, len(lasers), 3), axis=2)
+    #fitness = np.array((pperlaser/totalp[...,np.newaxis]), dtype=float)
+    #whichk = vectorized_choice(fitness.T, ks)
+
+

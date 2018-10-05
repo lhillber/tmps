@@ -14,19 +14,19 @@
 # ============
 #
 # python3, numpy, scipy, and matplotlib
-# 
+#
 # USAGE
 # =====
 # Assuming a Bash-like shell:
 # Wherever you have saved this script create the folowing directories:
-# 
+#
 #       mkdir -p data/fields
 #       mkdir -p plots/fields
 #
 # To run the default behavior (defined at the bottom of this file), run
-# 
+#
 #       python3 magnetics.py
-#       
+#
 # Try editing the AH_geometry dictionary to change the coil parameters.
 #
 # OUTPUT
@@ -35,13 +35,13 @@
 # The data is saved to data/fields. The file name is a hash of the
 # AH_geometry dictionary, so a unique name is created for any unique
 # set of geometry parameters.
-# 
+#
 # The default plotting functions are executed, and the results saved to
 # plots/fields/AH_field.pdf.
 #
 # Then, an additinal bit of code is executed to demonstrate how to acess the
-# field and gradient data. 
-# 
+# field and gradient data.
+#
 # By Logan Hillberry
 #
 # lhillberry@gmail.com
@@ -117,15 +117,74 @@ def hash_state(self_dict, exclude_keys):
 # MAGNETIC FIELDS
 # ===============
 
+def Bloop_axis(z, I, z0, R, u0=1.257e-6*1e2*1e-12):
+    return u0*I/2 * R*R/((z-z0)**2 + R*R)**(3/2)
+
+
+def Bcoil_axis(z, I, n, z0, d, R, M, N, **kwargs):
+    B = np.zeros_like(z)
+    for k in range(N):
+        for j in range(M):
+            B += Bloop_axis(z, I, z0 + n*(j+1/2)*d, R + (k+1/2)*d)
+    return B
+
+def BAH_axis(z, I, n, z0, d, R, M, N, A, **kwargs):
+    z0a = z0 + n*A
+    z0b = z0 - n*A
+    return Bcoil_axis(z,  I, n, z0a, d, R, M, N) +\
+           Bcoil_axis(z, -I, -n, z0b, d, R, M, N)
+
+def Bcoil_pair_axis(z, I1, I2, n, z0, d, R1, M1, N1, A1,
+                    R2, M2, N2, A2, **kwargs):
+    z01 = z0 + n*A1
+    z02 = z0 - n*A2
+    return Bcoil_axis(z,  I1, n, z01,  d, R1, M1, N1) +\
+           Bcoil_axis(z, -I2, -n, z02, d, R2, M2, N2)
+
+def BHH_axis(z, I, n, z0, d, R, M, N, A, **kwargs):
+    z0a = z0 + n*A
+    z0b = z0 - n*A
+    return Bcoil_axis(z, I,  n, z0a, d, R, M, N) +\
+           Bcoil_axis(z, I, -n, z0b, d, R, M, N)
+
+
+# Field of anti-Helmholtz and Helmholtz coils for creating a biased gradient
+def Bmop_axis(z, IAH, IHH, n, z0, d, RAH, MAH, NAH, AAH,
+            RHH, MHH, NHH, AHH, **kwargs):
+    return BHH_axis(z, IHH, n, z0, d, RHH, MHH, NHH, AHH) +\
+            BAH_axis(z, IAH, n, z0, d, RAH, MAH, NAH, AAH)
+
+def Bmop3_axis(z, I1, I2, n, z0, d, R1, M1, N1, A1,
+            R2, M2, N2, A2,**kwargs):
+    z0a = z0 + n * A1
+    z0b = z0 - n * A1
+    B = BAH_axis(z, I2, n, z0, d, R1, M1, N1, A2)
+    if I1 >= 0:
+        B += Bcoil_axis(z, I1, n, z0a, d, R1, M1, N1)
+    elif I1 < 0:
+        B += Bcoil_axis(z, -I1, -n, z0b, d, R2, M2, N2)
+    return B
+
+
+
 # Field at point r due to current I running in loop raidus R and normal vector
 # n centered at point r0.
 class Field():
     def __init__(self, geometry, recalc_B=True, data_dir='data/fields', load_fname=None):
-        geometry['r0'] = np.array(geometry['r0'], dtype=float)
-        geometry['n'] = np.array(geometry['n'], dtype=float)
+        for k in geometry:
+            if k[:2] == 'r0' or k[0] == 'n':
+                geometry[k] = np.array(geometry[k], dtype=float)
         self.geometry = geometry
         self.uid = hash_state(geometry, exclude_keys=['field_name'])
         self.fname = os.path.join(data_dir, self.uid)
+
+        vsamp = [-800, -600, -500, -400, -300, 300, 400, 500, 600, 800]
+        HH1 = [325.4, 273.9, 273.9, 273.9, 279.0, 751.4, 899.8, 1047.0, 1222.4, 1637.1]
+        HH2 = [1552.0, 1162.4, 1015.0, 866.6, 723.2, 240.6, 240.6, 235.5, 241.9, 276.]
+        AH1 = [1618.4, 1557.8, 1542.4, 1536.0, 1524.5, 1349.1, 1283.8, 1207.0, 1135.4, 1058.0]
+        AH2 = [1231.7, 1272.3, 1327.4, 1392.6, 1452.8, 1623.0, 1623.0, 1634.6, 1634.6, 1684.9]
+        self.Ifuncs = [interp1d(vsamp, Isamp, kind=2) for
+            Isamp in [AH1, AH2, HH1, HH2]]
 
         if not recalc_B:
             try:
@@ -142,6 +201,7 @@ class Field():
                          'sHH'   : self.BsquareHH,
                          'smop'  : self.Bsquare_mop,
                          'smop3' : self.Bsquare_mop3,
+                         'smop4' : self.Bsquare_mop4,
                          'l'     : self.Bloop,
                          'c'     : self.Bcoil,
                          'AH'    : self.BAH,
@@ -315,7 +375,7 @@ class Field():
     def Bsquare_loop(self, r, I, n, r0, L, W, ang, **kwargs):
         r0 = np.array(r0)
         l, m, n = coil_vecs2(n)
-        trans = rotation_matrix(n*ang)
+        trans = rotation_matrix(n*np.sin(ang))
         inv_trans = inv(trans)
         r = r - r0
         r = np.dot(r, inv_trans)
@@ -345,6 +405,23 @@ class Field():
         r0b = r0 - n*A
         return self.Bsquare_coil(r, I, n, r0a, L, W, d, M, N, ang) +\
                self.Bsquare_coil(r, I, -n, r0b, L, W, d, M, N, ang)
+
+
+    def Bsquare_mop4(self, r, V, n, r0, d, ang,
+                        LAH, WAH, MAH, NAH, AAH,
+                        LHH, WHH, MHH, NHH, AHH, **kwargs):
+        if V == None:
+            IAH1, IAH2, IHH1, IHH2 = 0.0, 0.0, 0.0, 0.0
+        else:
+            IAH1, IAH2, IHH1, IHH2 = (np.array([Ifunc(V) for Ifunc in self.Ifuncs]).T).tolist()
+        r0aAH = r0 + n*AAH
+        r0bAH = r0 - n*AAH
+        r0aHH = r0 + n*AHH
+        r0bHH = r0 - n*AHH
+        return self.Bsquare_coil(r,  IAH1,  n, r0aAH, LAH, WAH, d, MAH, NAH, ang) +\
+               self.Bsquare_coil(r,  IAH2, -n, r0bAH, LAH, WAH, d, MAH, NAH, ang) +\
+               self.Bsquare_coil(r,  IHH1,  n, r0aHH, LHH, WHH, d, MHH, NHH, ang) +\
+               self.Bsquare_coil(r,  IHH2, -n, r0bHH, LHH, WHH, d, MHH, NHH, ang)
 
     # Same as BHH but with currents of the two coils flowing in the same direction
     # (Helmholtz configuration)
@@ -377,42 +454,52 @@ class Field():
     # such that the first of M loops has its center at r0 and the Mth loop has its
     # center at r0 + M*d*n where n is the normal to the loops. The first loop of N
     # layers has radius R.
-    def Bcoil(self, r, I, n, r0, R, d, M, N, **kwargs):
+    def Bcoil(self, r, I, n, r0, d, R, M, N, **kwargs):
         B = np.zeros_like(r)
-        for j in range(M):
-            for k in range(N):
-                B += self.Bloop(r, I, n, r0 + n*(j+1/2)*d, R + (k+1/2)*d)
+        for k in range(N):
+            for j in range(M - k%1):
+                B += self.Bloop(r, I, n, r0 + n*(j+1/2+k%1)*d, R + (k+1/2)*d)
         return B
+
 
     # Field of two identical coils situated co-axially along loop-normal n, with the
     # closest loops of the two coils separated by 2A. Then, r0 is axial point
     # midway between the two coils. Current in the two coils flows in opposite
     # directions (anti-Helmholtz configuration)
-    def BAH(self, r, I, n, r0, R, d, M, N, A, **kwargs):
+    def BAH(self, r, I, n, r0, d, R, M, N, A, **kwargs):
+        #r0a = r0 + n*A
+        #r0b = r0 - n * (A + M * d)
         r0a = r0 + n*A
-        r0b = r0 - n * (A + M * d)
-        return self.Bcoil(r,  I,  n, r0a, R, d, M, N) +\
-               self.Bcoil(r, -I, n, r0b, R, d, M, N)
+        r0b = r0 - n*A
+        return self.Bcoil(r,  I,  n, r0a, d, R, M, N) +\
+               self.Bcoil(r, I, -n, r0b, d, R, M, N)
 
     # Same as BHH but with currents of the two coils flowing in the same direction
     # (Helmholtz configuration)
-    def BHH(self, r, I, n, r0, R, d, M, N, A, **kwargs):
-        r0a = r0 + n * A
-        r0b = r0 - n * (A + M * d)
-        return self.Bcoil(r, I, n, r0a, R, d, M, N) +\
-               self.Bcoil(r, I, n, r0b, R, d, M, N)
+    def BHH(self, r, I, n, r0, d, R, M, N, A, **kwargs):
+        #r0a = r0 + n * A
+        #r0b = r0 - n * (A + M * d)
+        r0a = r0 + n*A
+        r0b = r0 - n*A
+        return self.Bcoil(r, I, n, r0a, d, R, M, N) +\
+               self.Bcoil(r, -I, -n, r0b, d, R, M, N)
 
     # Field of anti-Helmholtz and Helmholtz coils for creating a biased gradient
-    def Bmop(self, r, IAH, nAH, r0AH, RAH, dAH, MAH, NAH, AAH,
-                IHH, nHH, r0HH, RHH, dHH, MHH, NHH, AHH, **kwargs):
-        return self.BAH(r, IAH, nAH, r0AH, RAH, dAH, MAH, NAH, AAH) +\
-               self.BHH(r, IHH, nHH, r0HH, RHH, dHH, MHH, NHH, AHH)
+    def Bmop(self, r, IAH, IHH, n, r0, d, RAH, MAH, NAH, AAH,
+                RHH, MHH, NHH, AHH, **kwargs):
+        return self.BAH(r, IAH, n, r0, d, RAH, MAH, NAH, AAH) +\
+               self.BHH(r, IHH, n, r0, d, RHH, MHH, NHH, AHH)
 
-    def Bmop3(self, r, I, n, r0, R1, d, M1, N1, A,
-                R2, M2, N2, **kwargs):
-        r0b = r0 - n * (A + M2 * d)
-        B = self.Bcoil(r, -I, n, r0b, R2, d, M2, N2)
-        B += self.BAH(r, I, n, r0, R1, d, M1, N1, A)
+
+    def Bmop3(self, r, I1, I2, n, r0, d, R1, M1, N1, A1,
+                R2, M2, N2, A2,**kwargs):
+        r0a = r0 + n * A1
+        r0b = r0 - n * A1
+        B = self.BAH(r, I2, n, r0, d, R1, M1, N1, A2)
+        if I1 >= 0:
+            B += self.Bcoil(r, I1, n, r0a, d, R1, M1, N1)
+        elif I1 < 0:
+            B += self.Bcoil(r, -I1, -n, r0b, d, R2, M2, N2)
         return B
 
 def coil_vecs2(n):
@@ -425,6 +512,66 @@ def coil_vecs2(n):
     m = np.cross(n, l)
     return l, m, n
 
+# Circuit estimates for Circular coils
+# ------------------------------------
+
+def dimensions(R, d, M, N, **kwargs):
+    Rmin = R-d/2
+    Rmax = R + (N - 1/2)*d
+    Rav = (Rmin + Rmax) / 2
+    width = M*d
+    return Rmin, Rmax, Rav, width
+
+def resistance(Rav, d, M, N, rho=16.78e-9 * 1e2):
+    return 8*M*N*Rav*rho / (d*d)
+
+def inductance(Rav, d, M, N, u0=1.257e-6*1e2):
+    return (M*N)**2 * u0 * Rav * (np.log(4*Rav / d) - 2) * 1e-4
+
+def capacitance(RR, LL, tau):
+    return 4 * LL * tau**2 / ( (tau*RR)**2 + (2*pi*LL)**2)
+
+def RLC_values(R, d, M, N, tau, **kwargs):
+    _, _, Rav, _ = dimensions(R, d, M, N)
+    RR = resistance(Rav, d, M, N)
+    LL = inductance(Rav, d, M, N)
+    CC = capacitance(RR, LL, tau)
+    return RR, LL, CC
+
+def RLC_model(RR, LL, CC):
+    alpha = RR / (2 * LL)
+    omega0 = 1 / np.sqrt(LL * CC)
+    beta = np.sqrt(omega0**2 - alpha**2)
+    zeta = RR/2 * np.sqrt(CC/LL)
+    if zeta>1:
+        print('over damped circuit')
+    return alpha, beta
+
+def current(t, V0, tau, R, d, M, N, **kwargs):
+    RR, LL, CC = RLC_values(R, d, M, N, tau)
+    alpha, beta = RLC_model(RR, LL, CC)
+    return V0 * np.exp(-alpha * t) * np.sin(beta * t) / (beta * LL)
+
+def split_geometry(geometry):
+    split_keys = []
+    for k,v in geometry.items():
+        if k[0] == 'I':
+            split_keys += [k[1:]]
+    geometries = {}
+    for sk in split_keys:
+        g = copy.deepcopy(geometry)
+        for k, v in geometry.items():
+            n = len(sk)
+            if k[-n:] == sk:
+                slimk = k[:-n]
+                for sk2 in split_keys:
+                    g[slimk] = geometry[k]
+                    try:
+                        del g[slimk+sk2]
+                    except:
+                        pass
+        geometries[sk] = g
+    return geometries
 
 # PLOTTING
 # ========
@@ -442,14 +589,14 @@ def wire_viz(ax, n, r0, L, d, color='k', **kwargs):
     rxyz = np.c_[x.flatten(), y.flatten(), z.flatten()]
     rxyz = np.dot(rxyz, trans)
     wire_data = rxyz + r0
-    x = wire_data[:,0].reshape(r.shape); 
-    y = wire_data[:,1].reshape(r.shape); 
-    z = wire_data[:,2].reshape(r.shape); 
+    x = wire_data[:,0].reshape(r.shape);
+    y = wire_data[:,1].reshape(r.shape);
+    z = wire_data[:,2].reshape(r.shape);
     ax.plot_surface(x,y,z, color=color)
 
 def square_loop_viz(ax, n, r0, L, W, d, ang, color='k', **kwargs):
         l, m, n = coil_vecs2(n)
-        rot = rotation_matrix(n*ang)
+        rot = rotation_matrix(n*np.sin(ang))
         l = np.dot(l, rot)
         m = np.dot(m, rot)
         wire_viz(ax,  l, r0 - W/2 * m, L, d, color=color)
@@ -494,9 +641,9 @@ def square_mop3_viz(ax, n, I1, r0, L1, W1, d, M1, N1, A, L2, W2, ang, M2, N2,
         square_coil_viz(ax, -n, r0b, L1, W1, d, ang, M1, N1, color=colorcoil)
 
 
-def loop_viz(ax, n, r0, R, d, color='k', **kwargs):
-    angle = np.linspace(0, 2 *pi, 32)
-    theta, phi = np.meshgrid(angle, angle)
+def loop_viz(ax, n, r0, d, R, color='k', **kwargs):
+    angle = np.linspace(0, pi, 16)
+    theta, phi = np.meshgrid(3*2*angle/4, 2*angle)
     x = (R + d/2.0 * np.cos(phi)) * np.cos(theta)
     y = (R + d/2.0 * np.cos(phi)) * np.sin(theta)
     z = d/2.0 * np.sin(phi)
@@ -505,12 +652,12 @@ def loop_viz(ax, n, r0, R, d, color='k', **kwargs):
     rxyz = np.c_[x.flatten(), y.flatten(), z.flatten()]
     rxyz = np.dot(rxyz, trans)
     loop_data = rxyz + r0
-    x = loop_data[:,0].reshape(theta.shape); 
-    y = loop_data[:,1].reshape(theta.shape); 
-    z = loop_data[:,2].reshape(theta.shape); 
+    x = loop_data[:,0].reshape(theta.shape);
+    y = loop_data[:,1].reshape(theta.shape);
+    z = loop_data[:,2].reshape(theta.shape);
     ax.plot_surface(x, y, z, color=color)
 
-def coil_viz(ax, n, r0, R, d, M, N, color=None, **kwargs):
+def coil_viz(ax, n, r0, d, R, M, N, color=None, **kwargs):
     if color is None:
         c = cycle(['C' + str(i) for i in range(10)][:M*N])
     else:
@@ -519,25 +666,25 @@ def coil_viz(ax, n, r0, R, d, M, N, color=None, **kwargs):
         for k in range(N):
             shift = r0 + n*(j+1/2)*d
             rad = R + (k+1/2)*d
-            loop_viz(ax, n, shift, rad, d, color=color)
+            loop_viz(ax, n, shift, d, rad, color=color)
 
-def coil_pair_viz(ax, n, r0, R, d, M, N, A, color=None, **kwargs):
+def coil_pair_viz(ax, n, r0, d, R, M, N, A, color=None, **kwargs):
     r0a = r0 + n * A
-    r0b = r0 - n * (A + M * d)
-    coil_viz(ax, n, r0a, R, d, M, N, color=color)
-    coil_viz(ax, n, r0b, R, d, M, N, color=color)
+    r0b = r0 - n * A
+    coil_viz(ax, n, r0a, d, R, M, N, color=color)
+    coil_viz(ax, n, r0b, d, R, M, N, color=color)
 
-def mop_viz(ax, nAH, r0AH, RAH, dAH, MAH, NAH, AAH,
-                nHH, r0HH, RHH, dHH, MHH, NHH, AHH,
+def mop_viz(ax, n, r0, d, RAH, MAH, NAH, AAH,
+                RHH, MHH, NHH, AHH,
                 colorAH=None, colorHH=None, **kwargs):
-    coil_pair_viz(ax, nAH, r0AH, RAH, dAH, MAH, NAH, AAH, color=colorAH)
-    coil_pair_viz(ax, nHH, r0HH, RHH, dHH, MHH, NHH, AHH, color=colorHH)
+    coil_pair_viz(ax, n, r0, d, RAH, MAH, NAH, AAH, color=colorAH)
+    coil_pair_viz(ax, n, r0, d, RHH, MHH, NHH, AHH, color=colorHH)
 
 def mop3_viz(ax, n, r0, R1, d, M1, N1, A, R2, M2, N2, 
         colorpair=None, colorcoil=None, **kwargs):
     r0b = r0 - n * (A + M2 * d)
-    coil_viz(ax, n, r0b, R2, d, M2, N2, color=colorcoil)
-    coil_pair_viz(ax, n, r0, R1, d, M1, N1, A, color=colorpair)
+    coil_viz(ax, n, r0b, d, R2, M2, N2, color=colorcoil)
+    coil_pair_viz(ax, n, r0, d, R1, M1, N1, A, color=colorpair)
 
 # dictionary mapping `config` to a viz function
 def geometry_viz(ax, geometry):
@@ -570,7 +717,7 @@ def rotation_matrix(d):
     sin_angle = norm(d)
     if sin_angle == 0:
         return np.identity(3)
-    d /= sin_angle
+    d = d/sin_angle
     eye = np.eye(3)
     ddt = np.outer(d, d)
     skew = np.array([[   0,   d[2], -d[1]],
@@ -603,7 +750,7 @@ def plot_3d(ax, field, grad_norm=False,
     if grad_norm:
         print('Plotting 3D gradient vectors...')
         VX, VY, VZ = [1e12 * interp(r) for interp in field.grad_norm_BXYZ_interp]
-        title = r'$\nabla |\bf{B}$|'
+        title = r'$\nabla B$'
     else:
         print('Plotting 3D field vectors...')
         VX, VY, VZ = [1e12 * interp(r) for interp in field.BXYZ_interp]
@@ -684,7 +831,7 @@ def plot_contour(fignum, field, grad_norm=False,
             #plt.clim(*clim)
             ax.set_ylabel(coord_labels[ybase] + ' [cm]')
             ax.set_xlabel(coord_labels[xbase] + ' [cm]')
-            ax.set_title(title % (coord_labels[coord], z[zi]))
+            ax.set_title(title % (coord_labels[coord], z[zi]), fontsize=12)
             c += 1
             ax.axis('scaled')
     cax = fig.add_axes([0.87, 0.23, 0.02, 0.14])
@@ -723,8 +870,8 @@ def plot_slices(fignum, field, grad_norm=False):
                 xs = np.vstack((off, on, z)).T
             if coord in ('x', 'z', r'\rho'):
                 xs = np.vstack((on, off, z)).T
-            ax.xaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-            ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+            ax.xaxis.set_major_formatter(FormatStrFormatter('%.2f'))
+            ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
             if coordi == 0:
                 ax.xaxis.set_major_formatter(NullFormatter())
             if coordi != 0:
@@ -733,7 +880,7 @@ def plot_slices(fignum, field, grad_norm=False):
             ax.plot(z[mask], 1e12 * interp(xs[mask]),label=label)
     ax.legend(ncol=1, loc='lower left', bbox_to_anchor=[1,0.2],
             handlelength=1, labelspacing=0.2, handletextpad=0.2)
-    ax.text(1.04, 1.65, r'$\rho$ [cm]', transform=ax.transAxes)
+    ax.text(1.04, 1.2, r'$\rho$ [cm]', transform=ax.transAxes)
     plt.subplots_adjust(hspace=0.0)
     fignum += 1
     return fignum
@@ -1024,10 +1171,72 @@ def AH_example():
     plt.show()
 
 if __name__ == '__main__':
-    smop3_field = Field(smop3_geometry, recalc_B=True)
-    # run default plotting
-    show_field_and_wires(1, smop3_field)
+
+    geometry = dict(
+        # coil params
+        config = 'mop3',
+        I1      = 1500.0,  # bias max current, A
+        I2      = 1500.0,  # kick max current, A
+        n = [0, 0, 1],
+        r0 = [0.0, 0.0, 0.0],
+        d  = 0.086,
+
+        R1 = 3.678,
+        A1 = 1.580,
+        M1 = 7,
+        N1 = 2,
+
+        R2 = 3.145,
+        A2 = 1.717,
+        M2 = 7,
+        N2 = 2,
+
+        # B-field solution grid
+        Nzsteps  =  100,
+        Nysteps  =  100,
+        Nxsteps  =  100,
+        xmin     = -5,
+        xmax     =  5,
+        ymin     = -3,
+        ymax     =  3,
+        zmin     = -3,
+        zmax     =  3,
+        )
+
+    sg = split_geometry(geometry)
+    ts = np.linspace(0, 500e-6, 200)
+    Imaxs = {}
+    for k, g in sg.items():
+        Is = current(ts, V0=1000, tau=250e-6, **g)
+        print(RLC_values(tau=250e-6, **g))
+        Imax = np.max(Is)
+        Imaxs[k] = Imax
+        plt.plot(ts, Is)
     plt.show()
+    print(Imaxs)
+
+    zs = np.linspace(-0.5,0.5,200)
+    geometry['z0']=0.0
+    geometry['n']=1.0
+    geometry['IAH']=np.min(list(Imaxs.values()))
+    geometry['IHH']=np.min(list(Imaxs.values()))
+
+    geometry['I1'] = 1500
+    geometry['I2'] = 1500
+    Bs = Bmop3_axis(zs, **geometry) * 1e12
+
+    plt.clf()
+    plt.plot(zs, Bs)
+    plt.show()
+    plt.clf()
+    dBs = np.gradient(Bs, zs[1]-zs[0])
+    plt.plot(zs, dBs)
+    plt.show()
+    print(np.mean(dBs), np.std(dBs))
+    #smop3_field = Field(smop3_geometry, recalc_B=True)
+    # run default plotting
+    #show_field_and_wires(1, smop3_field)
+    #plt.show()
     #field_analysis(smop3_field, 'smop3_pos_field',
     #    fignum=0,
     #    show=True,
