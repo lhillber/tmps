@@ -29,14 +29,14 @@ I1 = [I for I in np.arange(-1800.0, 1800+600, 600.0)]
 I2 = 1500.0
 
 # Final detection distance from coils
-r0_detect= [[39.8+4.8, 0.0, 0.0],
-            [57.8, 0.0, 0.0]]
+r0_detect= [[39.8+4.5, 0.0, 0.0],
+            [57.8+0, 0.0, 0.0]]
 
-r0_cloud = [-38.0, 0.0, 0.0]
+r0_cloud = [-38.0-5.5, 0.0, 0.0]
 
-r0_ph = [-5.4, 0.0, 0.0]
+r0_ph = [-5.4-6, 0.0, 0.0]
 
-width = [0.5, 0.24, 0.26]
+width = [0.5, 0.2, 0.2]
 
 
 # Properties of the cloud
@@ -47,11 +47,11 @@ cloud_params = dict(
     vrecoil = 0,               # recoil velocity of transition, cm/us
 
     # cloud params
-    max_init  = 10000,                      # max initialization cycles
-    Tt        = 120.0,                      # initial transverse temperature, mK
-    Tl        = 200.0,                      # initial longitudinal temperature, mK
+    max_init  = 10000,                    # max initialization cycles
+    Tt        = 100.0,                    # initial transverse temperature, mK
+    Tl        = 200.0,                    # initial longitudinal temperature, mK
     Natom     = 1000,                     # number of atoms to simulate
-    width     = width,        # initial size (st. dev), cm
+    width     = width,            # initial size (st. dev), cm
     r0_cloud = r0_cloud,          # initial center, cm
     v0        = [480.0*1e-6*1e2, 0.0, 0.0], # initial velocity, cm/us
 
