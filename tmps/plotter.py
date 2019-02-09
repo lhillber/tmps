@@ -2,7 +2,7 @@
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import os
-from src.fio import base_dir
+from tmps.fio import base_dir
 
 
 def multipage(fname, fignums=None, **kwargs):

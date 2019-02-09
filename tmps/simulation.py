@@ -1,12 +1,12 @@
-from src.plotter import units_map, Plotter
-from src.units import muB
-from src.fio import IO, base_dir
+from tmps.plotter import units_map
+from tmps.units import muB
+from tmps.fio import IO
 
 import numpy as np
 import os
 import sys
-import src.cloud as cloud
-import src.magnetics as mag
+import tmps.cloud as cloud
+import tmps.magnetics as mag
 import matplotlib.pyplot as plt
 
 import matplotlib as mpl
@@ -243,7 +243,7 @@ class Simulation(IO):
             fig, axs = plt.subplots(1, 1, figsize=(7, 2))
         else:
             fig = plt.gcf()
-        ts = np.take(sim.ts, self.observe)
+        ts = np.take(self.ts, self.observe)
         data = self.measures[measure_name]
         if measure_name in ("n", "rho"):
             data = data[..., np.newaxis]
@@ -382,7 +382,3 @@ class Simulation(IO):
             else:
                 break
         return fig, axs
-
-
-
-

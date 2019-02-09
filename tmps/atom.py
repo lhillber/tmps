@@ -1,7 +1,7 @@
 # atom.py
 
-from src.fio import IO
-from src.units import h, muB, Li7_props
+from tmps.fio import IO
+from tmps.units import h, muB, Li7_props
 
 import numpy as np
 from scipy.interpolate import interp1d

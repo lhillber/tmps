@@ -5,3 +5,7 @@
 /data/cloud
 /data/simulation
 /src/__pycache__
+/build
+/dist
+/tmps.egg-info
+

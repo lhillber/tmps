@@ -1,5 +1,5 @@
-from src.units import u0, pi
-from src.fio import IO
+from tmps.units import u0, pi
+from tmps.fio import IO
 from copy import deepcopy
 from numpy.linalg import norm, inv
 from scipy.special import ellipe, ellipk
