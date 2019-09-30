@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 
 import matplotlib as mpl
 from mpl_toolkits.mplot3d import axes3d, Axes3D
+import matplotlib.animation as animation
+
 
 mpl.rcParams["ps.fonttype"] = 42
 plt_params = {"font.size": 12, "figure.max_open_warning": 0}
@@ -382,3 +384,42 @@ class Simulation(IO):
             else:
                 break
         return fig, axs
+
+    def animate_traj(self, N=50):
+        def update_lines(num, dataLines, lines):
+            for line, data in zip(lines, dataLines):
+                line.set_data(data[0:2, :num+1])
+                line.set_3d_properties(data[2, :num+1])
+            return lines
+
+        # Attaching 3D axis to the figure
+        fig = plt.figure()
+        ax = fig.add_subplot(1, 1, 1, projection="3d")
+
+        # Fifty lines of random 3-D lines
+        data = self.xs[::, :N, ::].transpose([1, 2, 0])
+        print(data.shape)
+        lines = [ax.plot(self.xs[0:1, j, 0],
+                         self.xs[0:1, j, 1],
+                         self.xs[0:1, j, 2])[0] for j in range(N)]
+
+        # Setting the axes properties
+        ax.set_xlim3d([-1.0, 1.0])
+        ax.set_xlabel("X")
+        ax.set_ylim3d([-1.0, 1.0])
+        ax.set_ylabel("Y")
+        ax.set_zlim3d([-1.0, 1.0])
+        ax.set_zlabel("Z")
+
+        ax.set_title("3D Test")
+
+        # Creating the Animation object
+
+
+        ani = animation.FuncAnimation(
+            fig, update_lines, 1000, fargs=(data, lines), interval=1, blit=False
+        )
+
+        ani.save('plots/traj_animation.mp4', fps=30, extra_args=['-vcodec', 'libx264'])
+
+        plt.show()

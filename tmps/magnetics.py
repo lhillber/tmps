@@ -40,6 +40,7 @@ def curr_pulse(t, t0, tau, shape, scale, **kwargs):
     else:
         return 0.0
 
+
 # https://stackoverflow.com/questions/18228966/how-can-matplotlib-2d-patches-be-transformed-to-3d-with-arbitrary-normalsu
 def rotation_matrix(d):
     """
@@ -131,15 +132,7 @@ class Domain:
 
 
 class Field(IO):
-    def __init__(
-        self,
-        geometry,
-        dir=None,
-        nickname=None,
-        recalc=False,
-        save=True,
-    ):
-
+    def __init__(self, geometry, dir=None, nickname=None, recalc=False, save=True):
         if "ang" not in geometry:
             geometry["ang"] = 0.0
         if "d" not in geometry:
@@ -147,37 +140,35 @@ class Field(IO):
         if "method" not in geometry:
             geometry["method"] = "exact"
         if "meshspec" not in geometry:
-            meshspec = [[-2.0, 2.0, 100]] * 3,
+            meshspec = [[-1.0, 1.0, 100]] * 3
         else:
-            meshspec = geometry.pop("meshspec")
+            meshspec = geometry["meshspec"]
 
-        geometry["n"] = np.array(geometry["n"])
-        geometry["r0"] = np.array(geometry["r0"])
-
+        geometry["n"] = np.array(geometry["n"], dtype=float)
+        geometry["r0"] = np.array(geometry["r0"], dtype=float)
         if geometry["config"][0:2] == "sq":
             sq = True
             config = geometry["config"][3:]
         else:
             sq = False
 
-
-        config = geometry.pop("config")
-        i = 0
+        config = geometry["config"]
+        sqoffset = 0
         if config[0:2] == "sq":
             sq = True
-            i = 2
+            sqoffset = 2
 
         self.meshspec = meshspec
         self.config = config
         self.base_args = []
         self.geometry = geometry
-        getattr(self, "add_" + self.config[i:])(sq=sq, **self.geometry)
+        getattr(self, "add_" + self.config[sqoffset:])(sq=sq, **self.geometry)
 
         super().__init__(
             dir=dir,
             nickname=nickname,
             recalc=recalc,
-            uid_keys=["geometry", "config", "meshspec"],
+            uid_keys=["geometry"],
         )
 
         if self.recalc:
@@ -191,6 +182,7 @@ class Field(IO):
         for kwargs in self.base_args:
             config = kwargs["config"]
             func = getattr(self, "B" + config + "_zaxis")
+            #func = getattr(self, "B" + config)
             B += transform(r, func=func, **kwargs)
         return B
 
@@ -278,6 +270,22 @@ class Field(IO):
         self.add_line(n=-m, ang=ang, r0=r0 - l * L / 2, L=W, d=d, I=I, method=method)
         self.add_line(n=m, ang=ang, r0=r0 + l * L / 2, L=W, d=d, I=I, method=method)
 
+    def add_hexapole(self, r0, n, d, L, a, I=1.0, method="exact", **kwargs):
+        s = a * np.sin(pi / 6)
+        c = a * np.cos(pi / 6)
+        locs = [
+            np.array([0, a, 0]),
+            np.array([0, s, c]),
+            np.array([0, -s, c]),
+            np.array([0, -a, 0]),
+            np.array([0, -s, -c]),
+            np.array([0, s, -c]),
+        ]
+
+        for m, loc in enumerate(locs):
+            self.add_line(n=(-1)**m*n, ang=0, r0=r0+loc, L=L, d=d, I=I, method=method)
+
+
     def add_coil(self, r0, n, ang, d, M, N, I=1.0, method="exact", sq=False, **kwargs):
         for k in range(N):
             for j in range(M):
@@ -350,7 +358,7 @@ class Field(IO):
             HH_kwargs["W"] = W
             L = AH_kwargs.pop("LAH")
             W = AH_kwargs.pop("WAH")
-            AH_kwargs["L"] = L 
+            AH_kwargs["L"] = L
             AH_kwargs["W"] = W
         else:
             R = HH_kwargs.pop("RHH")
@@ -358,7 +366,52 @@ class Field(IO):
             R = AH_kwargs.pop("RAH")
             AH_kwargs["R"] = R
         self.add_HH(r0, n, ang, d, M, N, AHH, I=IHH, method=method, sq=sq, **HH_kwargs)
-        self.add_AH(r0, n, ang, d, M, N, AHH, I=IAH, method=method, sq=sq, **AH_kwargs)
+        self.add_AH(r0, n, ang, d, M, N, AAH, I=IAH, method=method, sq=sq, **AH_kwargs)
+
+    def add_mop3(
+        self,
+        r0,
+        n,
+        ang,
+        d,
+        M,
+        N,
+        A1,
+        A2,
+        I2=1.0,
+        I1=1.0,
+        method="exact",
+        sq=False,
+        **kwargs,
+    ):
+
+        HH_kwargs = deepcopy(kwargs)
+        C_kwargs = deepcopy(kwargs)
+        if sq:
+            L = HH_kwargs.pop("L2")
+            W = HH_kwargs.pop("W2")
+            HH_kwargs["L"] = L
+            HH_kwargs["W"] = W
+            L = C_kwargs.pop("L1")
+            W = C_kwargs.pop("W1")
+            C_kwargs["L"] = L
+            C_kwargs["W"] = W
+        else:
+            R = HH_kwargs.pop("R2")
+            HH_kwargs["R"] = R
+            R = C_kwargs.pop("R1")
+            C_kwargs["R"] = R
+        self.add_HH(r0, n, ang, d, M, N, A2, I=I2, method=method, sq=sq, **HH_kwargs)
+        if I1 >= 0:
+            r0a = r0 + n * A1
+            self.add_coil(
+                r0a, n, ang, d, M, N, I=I1, method=method, sq=sq, **C_kwargs
+            )
+        elif I1 < 0:
+            r0b = r0 - n * A1
+            self.add_coil(
+                r0b, -n, -ang, d, M, N, I=-I1, method=method, sq=sq, **C_kwargs
+            )
 
     def line_viz(self, ax, n, r0, L, d, color="k", **kwargs):
         a = [[0, -L / 2], [d / 2, -L / 2], [d / 2, L / 2], [0, L / 2]]
@@ -420,6 +473,7 @@ class Field(IO):
         VZ.shape = Z.shape
         B = np.sqrt(VX ** 2 + VY ** 2 + VZ ** 2)
         mask = B > Bclip
+        print(sum(mask))
         B[mask] = np.nan
         VX[mask] = np.nan
         VY[mask] = np.nan
@@ -622,20 +676,8 @@ class Field(IO):
 if __name__ == "__main__":
 
     geometries = [
-        dict(
-            config="loop",
-            I=1000,
-            R=1.0,
-            n=[0.0, 1.0, 1.0],
-            r0=[0.0, 0.0, 0.0],
-        ),
-        dict(
-            config="line",
-            I=1000,
-            L=1.0,
-            n=[0.0, 0.0, 1.0],
-            r0=[0.0, 0.0, 0.0],
-        ),
+        dict(config="loop", I=1000, R=1.0, n=[0.0, 1.0, 1.0], r0=[0.0, 0.0, 0.0]),
+        dict(config="line", I=1000, L=1.0, n=[0.0, 0.0, 1.0], r0=[0.0, 0.0, 0.0]),
         dict(
             config="sqloop",
             I=1000,
@@ -731,15 +773,25 @@ if __name__ == "__main__":
             r0=[0.0, 0.0, 0.0],
             meshspec=[[-3.0, 3.0, 100]] * 3,
         ),
+        dict(
+            config="hexapole",
+            I=1000,
+            d=0.086,
+            a=1,
+            L=8,
+            n=[1.0, 0.0, 0.0],
+            r0=[0.0, 0.0, 0.0],
+            meshspec=[[-0.5, 0.5, 100]] * 3,
+        ),
     ]
 
-    for i, geometry in enumerate(geometries):
+    for i, geometry in enumerate(geometries[-1:]):
         print(i, geometry["config"])
-        if i == 9:
-            field = Field(geometry, recalc=True)
-            field.plot_slices()
-            field.plot_linecuts()
-            field.plot_3d()
-            plt.show()
-            plt.clf()
-            print(field.normB_interp(np.array([0, 0, 0])))
+        field = Field(geometry, recalc=True, save=False)
+        field.plot_linecuts(grad_norm=True, components="xz", lines=[[0, 0, "var"],[0.1, 0.1, "var"]])
+
+        #field.plot_slices()
+        #field.plot_3d()
+        plt.show()
+        plt.clf()
+        print(field.normB_interp(np.array([0, 0, 0])))

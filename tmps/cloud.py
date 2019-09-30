@@ -301,6 +301,9 @@ class Cloud(IO):
     # time evolution
     def rk4(self, a, dt):
         k1 = dt * a(self.xs, self.t)
+        if np.sum(k1) == 0:
+            self.free_expand(dt)
+            return
         l1 = dt * self.vs
         k2 = dt * a(self.xs + l1 / 2, self.t + dt / 2)
         l2 = dt * (self.vs + k1 / 2)
@@ -311,6 +314,7 @@ class Cloud(IO):
         self.xs = self.xs + 1 / 6 * (l1 + 2 * l2 + 2 * l3 + l4)
         self.vs = self.vs + 1 / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
         self.t += dt
+        return
 
     # time evolution (no forces)
     def free_expand(self, Dt):
@@ -459,5 +463,5 @@ if __name__ == "__main__":
     print("n", cloud.n)
     print("rho", cloud.rho)
     cloud.atom.plot_spectrum()
-    # cloud.plot_phasespace()
-    # plt.show()
+    cloud.plot_phasespace()
+    plt.show()

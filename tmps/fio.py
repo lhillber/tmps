@@ -4,26 +4,25 @@
 #
 # 1) Hash a dictionary of parameters to generate a unique ID (uid).
 # 2) Inherit from the IO class elsewhere to enable saving and loading of that
-#    child class. Supports composition. Multiple inheritence untested
-
+#    child class. Supports composition. Multiple inheritence untested.
+#
 #
 #  By Logan Hillberry
 
-from os import path
+from os import path, pardir
 from copy import deepcopy
-from numpy import ndarray
+from numpy import ndarray, int64
+from os import getcwd
 from hashlib import sha1
 import json
 from pickle import dumps, loads
 
 
-# base directory of project
-base_dir = path.abspath(path.join(path.dirname(__file__), path.pardir))
-
+base_dir = path.join(getcwd(), pardir)
 
 def hash_state(d, uid_keys):
     """
-    Create a unique ID for a d based on the values
+    Create a unique ID for a dict based on the values
     associated with uid_keys.
     """
     name_dict = {}
@@ -60,7 +59,7 @@ def dict_el_int2float(d):
     Convert dict values to floats if they are ints.
     """
     for k, v in d.items():
-        if type(v) == int:
+        if type(v) in (int, int64) :
             d[k] = float(v)
         if type(v) == dict:
             dict_el_int2float(v)
@@ -93,7 +92,7 @@ class IO:
     """
 
     def __init__(self, recalc=False, nickname=None, dir=None, uid_keys=[]):
-
+        print("enter")
         if nickname is None:
             self.nickname = self.uid(uid_keys)
         else:
@@ -118,7 +117,7 @@ class IO:
                 self.loaded = True
                 self.recalc = False
             except FileNotFoundError:
-                print("{} data not found".format(ext))
+                print(f"{ext} data not found")
                 print("Generating now...")
                 self.loaded = False
                 self.recalc = True
@@ -129,7 +128,7 @@ class IO:
         if attr in self._io:
             return self._io[attr]
         else:
-            raise AttributeError("no attribute %s" % attr)
+            raise AttributeError(f"no attribute {attr}")
 
     @property
     def uid_values(self, uid_keys):
@@ -142,7 +141,7 @@ class IO:
         return hash_state(self.__dict__, uid_keys)
 
     def save(self):
-        print("Saving {} data to {}".format(self.ext, self.rel_fname))
+        print(f"Saving {self.ext} data to {self.rel_fname}")
         save_dict = deepcopy(self.__dict__)
         for k, v in self.__dict__.items():
             if IO in type(v).mro():
@@ -151,7 +150,7 @@ class IO:
             f.write(dumps(save_dict))
 
     def load(self):
-        print("Loading {} data from {}".format(self.ext, self.rel_fname))
+        print(f"Loading {self.ext} data from {self.rel_fname}")
         with open(self.fname, "rb") as f:
             instance = f.read()
         self.__dict__.update(loads(instance))
@@ -180,7 +179,7 @@ if __name__ == "__main__":
             return self._data1
 
         def make_data(self):
-            print("Making {} data...".format(type(self).__name__))
+            print(f"Making {type(self).__name__} data...")
             return sum(self.params.values())
 
     class Level2(IO):
@@ -208,7 +207,7 @@ if __name__ == "__main__":
             return self._data2
 
         def create_data(self):
-            print("Creating {} data...".format(type(self).__name__))
+            print("Creating {type(self).__name__} data...")
             return sum(self.params.values()) ** 2
 
     params1 = {"p1": 1.0, "p2": 2}
